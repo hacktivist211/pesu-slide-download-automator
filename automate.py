@@ -3,10 +3,8 @@ import re
 
 downloaded_urls = set()
 
-
 def sanitize(name: str):
     return re.sub(r"[^\w\- ]", "", name).strip()
-
 
 # 1. LOGIN
 def login(page, username, password):
@@ -26,18 +24,12 @@ def login(page, username, password):
     print("Logged in successfully.")
     return True
 
-
 # 2. SELECT COURSE
 def select_course(page):
-    page.wait_for_selector(
-        "span.menu-name:has-text('My Courses')",
-        timeout=15000
-        )
+    page.wait_for_selector("span.menu-name:has-text('My Courses')", timeout=15000)
     page.click("span.menu-name:has-text('My Courses')")
     page.wait_for_selector("table.table.table-hover", timeout=15000)
-    no_content = page.locator(
-            "h2:text('No subjects found')"
-        )
+    no_content = page.locator("h2:text('No subjects found')")
 
     rows = page.locator("table.table.table-hover tbody tr")
     count = rows.count()
@@ -62,7 +54,6 @@ def select_course(page):
     print(f"Opening: {course_name}")
 
     return course_name
-
 
 # 3. SELECT UNIT
 def select_unit(page):
@@ -91,7 +82,6 @@ def select_unit(page):
 
     return unit_name
 
-
 # 4. CLICK FIRST SLIDE
 def open_first_slide(page):
     page.wait_for_selector("span.pesu-icon-presentation-graphs", timeout=15000)
@@ -100,29 +90,32 @@ def open_first_slide(page):
     page.wait_for_timeout(800)
     print("Clicked first slide entry.")
 
-
-# 5. DOWNLOAD SLIDES
-def download_slides(page, course_name, unit_name, downloaded_urls):
+# 5. DOWNLOAD CONTENT
+def download_slides(page, course_name, unit_name, downloaded_urls, category="Slide"):
     page.wait_for_timeout(800)
-    page.wait_for_selector(".link-preview", timeout=15000)
+    
+    if not page.locator(".link-preview").count():
+        return
 
     slide_items = page.locator(".link-preview")
     slide_count = slide_items.count()
-    print(f"\nFound {slide_count} files.")
+    print(f"\nFound {slide_count} {category} files.")
 
     folder = f"{course_name} {unit_name}"
     os.makedirs(folder, exist_ok=True)
 
-    existing = [
-        int(f.split(".")[0]) for f in os.listdir(folder)
-        if f.split(".")[0].isdigit()
-    ]
+    existing = []
+    for f in os.listdir(folder):
+        if f.startswith(category):
+            match = re.search(r'\d+', f)
+            if match:
+                existing.append(int(match.group()))
+    
     next_number = max(existing) + 1 if existing else 101
 
     for i in range(slide_count):
         item = slide_items.nth(i)
 
-        # Case 1: <a onclick="loadIframe(...)">
         link = item.locator("a")
         onclick = link.get_attribute("onclick") if link.count() else None
         urls = []
@@ -131,24 +124,16 @@ def download_slides(page, course_name, unit_name, downloaded_urls):
         if onclick:
             urls = re.findall(r"loadIframe\('([^']+)", onclick)
 
-        # Case 2: <div onclick="downloadcoursedoc(...)">
         if not urls:
             onclick_div = item.get_attribute("onclick")
             if onclick_div:
-                matches = re.findall(
-                    r"downloadcoursedoc\('([^']+)'",
-                    onclick_div
-                )
+                matches = re.findall(r"downloadcoursedoc\('([^']+)'", onclick_div)
                 if matches:
-                    urls = [
-                        f"/Academy/a/referenceMeterials/downloadslidecoursedoc/{m}"
-                        for m in matches
-                    ]
-
+                    urls = [f"/Academy/a/referenceMeterials/downloadslidecoursedoc/{m}" for m in matches]
                     is_case2 = True
 
         if not urls:
-            print("Could not extract URL.")
+            print(f"Could not extract URL for {category}.")
             continue
 
         for url in urls:
@@ -165,10 +150,10 @@ def download_slides(page, course_name, unit_name, downloaded_urls):
                 print(f"Failed ({response.status})")
                 continue
 
-            # Force .pptx for case 2, .pdf otherwise
-            ext = ".pptx" if is_case2 else ".pdf"
-            filename = f"{next_number}{ext}"
+            ext = ".pptx" if is_case2 and category == "Slide" else ".pdf"
+            filename = f"{category}_{next_number}{ext}"
             filepath = os.path.join(folder, filename)
+            
             with open(filepath, "wb") as f:
                 f.write(response.body())
 
@@ -177,33 +162,26 @@ def download_slides(page, course_name, unit_name, downloaded_urls):
             next_number += 1
             page.wait_for_timeout(300)
 
-
 # 6. PAGE NAVIGATION
 def navigate_through_pages(page, course_name, unit_name, downloaded_urls):
+    target_tabs = [
+        ("#contentType_1", "Note"),
+        ("#contentType_2", "Slide"),
+        ("#contentType_5", "QB")
+    ]
+
     while True:
-        page.wait_for_selector(
-            ".coursecontent-navigation-area a.pull-right",
-            timeout=15000
-            )
-        next_button = page.locator(
-            ".coursecontent-navigation-area a.pull-right"
-            )
+        page.wait_for_selector(".coursecontent-navigation-area a.pull-right", timeout=15000)
+        next_button = page.locator(".coursecontent-navigation-area a.pull-right")
         label = next_button.inner_text().strip()
-        print("\nCurrent button:", label)
+        print(f"\nCurrent button: {label}")
 
-        # Open slides tab
-        slides_tab = page.locator("#contentType_2")
-        slides_tab.click()
-        page.wait_for_timeout(600)
-
-        no_slides = page.locator(
-            "h2:text('No Slides Content to Display')"
-        )
-
-        if no_slides.is_visible():
-            print("No slides available. Skipping download.")
-        else:
-            download_slides(page, course_name, unit_name, downloaded_urls)
+        for tab_id, category in target_tabs:
+            tab_element = page.locator(tab_id)
+            if tab_element.is_visible():
+                tab_element.click()
+                page.wait_for_timeout(600)
+                download_slides(page, course_name, unit_name, downloaded_urls, category)
 
         if "Back to Units" in label:
             print("Reached 'Back to Units'. Stopping navigation.")
