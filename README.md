@@ -1,108 +1,60 @@
-# PESU Academy Slide Download Automation
+# PESU Academy Automator
+
+## Project Overview
+
+The **PESU Academy Automator** is a rigorously engineered Python framework designed to streamline the extraction, conversion, and organization of academic resources from the PESU Academy portal. This utility eliminates the manual overhead of navigating complex web structures, providing a unified pipeline for high-fidelity content acquisition and post-processing.
 
 ---
 
-## Index
+## Core Functionalities
 
-1. [Overview](#overview)
-2. [Installation](#installation)
-3. [Auto Download Slides](#auto-download-slides)
-4. [Features for Pre-Existing Folders](#features-for-pre-existing-folders)
+### 1. Automated Content Acquisition
 
-   * [Converting PPTX to PDF](#converting-pptx-to-pdf)
-   * [Merge PDFs](#merge-pdfs)
-5. [Hide View Playwright Automation](#hide-view-playwright-automation)
-6. [Notes](#notes)
+The system utilizes `Playwright` for high-precision browser automation to handle the portal's dynamic interface.
 
----
+* **Session Management**: Securely authenticates user credentials and maintains session persistence using `.env` configurations.
+* **Intelligent Navigation**: Programmatically traverses course hierarchies, selecting specific units and iterating through slide-based content.
+* **Multi-Format Extraction**: Simultaneously identifies and retrieves Presentation Slides, Supplementary Notes, and Question Banks (QB).
+* **AV Summary Resolution**: Implements a custom logic to resolve and download direct MP4 streams and Vimeo-hosted video content.
 
-## Overview
+### 2. Batch Presentation Conversion
 
-This Python script automates the process of logging into PESU Academy, selecting a course, selecting a unit, opening the first slide, downloading and optionally merging available files using Playwright. All session data is stored only in memory, and the script prompts for your credentials at runtime. It is designed to simplify navigation inside PESU Academy without saving any user data locally.
+To ensure document portability, the tool features a dedicated conversion module for transforming proprietary slide formats.
 
----
+* **Cloud-Based Conversion**: Leverages the iLovePDF engine via headless browser sessions to convert `.pptx` files to standardized `.pdf`.
+* **Batch Optimization**: Processes files in configurable batches (defaulting to 3) to optimize throughput while respecting service constraints.
+* **Archive Management**: Automatically extracts and flattens ZIP archives downloaded during the conversion process.
 
-## Installation
+### 3. PDF Consolidation and Management
 
-1. Install requirements:
+The merging module provides sophisticated file-handling to organize all downloaded assets into a professional document structure.
 
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. Install Playwright browsers:
-
-   ```bash
-   playwright install
-   ```
+* **Linear Merging**: Sequentially combines PDFs based on numerical topic ordering derived from file names.
+* **Dynamic Scope Control**: Allows users to define whether the final output should include only slides or integrate relevant Question Banks.
+* **Storage Optimization**: Offers automated cleanup options to delete source files post-merge, maintaining a clean workspace.
 
 ---
 
-## Auto Download Slides
+## Technical Architecture
 
-1. Run the main script:
-
-   ```bash
-   python main.py
-   ```
-
-2. Enter your SRN/PRN and password when prompted.
-
-3. Follow the on-screen prompts to select a course and unit.
-
-4. The script will open the first slide, download available files, automatically convert pptx to ppt files, and optionally merge them.
+| Component | Module | Primary Responsibility |
+| --- | --- | --- |
+| **Orchestrator** | `main.py` | Manages execution flow, user input, and session lifecycle. |
+| **Automation Engine** | `automate.py` | Handles DOM interaction, login sequences, and scraping. |
+| **Conversion Logic** | `file_conversion.py` | Manages PPTX-to-PDF transformations and ZIP extraction. |
+| **PDF Processor** | `merge.py` | Executes PDF merging and source file cleanup. |
+| **Configuration** | `config.py` | Persists credentials and user preferences across sessions. |
+| **Debugging** | `debugging.py` | Provides hooks for console, network, and DOM event logging. |
 
 ---
 
-## Features for Pre-Existing Folders
+## Program Output and Artifacts
 
-### Converting PPTX to PDF
+Upon successful execution, the system generates a structured directory named according to the course and unit. The final artifacts include:
 
-You can automatically convert PPTX files to PDF using **`file_conversion.py`** for pre existing folders:
+* **Merged PDF Document**: A single file (e.g., `merged.pdf`) containing all processed slides in chronological order.
+* **AV Summaries**: A subfolder containing downloaded video content named sequentially.
+* **Supplementary Material**: Organized subdirectories for Notes and Question Banks if selected during the prompt.
+* **Configuration State**: An updated `.env` file reflecting your saved credentials and process preferences (e.g., `MERGE_PDFS=1`).
 
-```bash
-python file_conversion.py --folder "FolderName"
-```
-
-### Merge PDFs
-
-You can merge PDFs from any folder using the `merge.py` script:
-
-```bash
-python merge.py --folder "FolderName" --output "merged.pdf"
-```
-
-* If `merged.pdf` already exists, the script will automatically create `merged[1].pdf`, `merged[2].pdf`, etc.
-* `--folder` is required, `--output` is optional.
-
----
-
-## Hide View Playwright Automation
-
-To not see the browser while automating
-1. Change headless mode in `main.py` and `file_conversion.py` from `False` to `True`:
-
-```python
-browser = p.chromium.launch(headless=True)
-```
-
-2. Uncomment out resource blocking:
-
-```python
-page.route(
-    "**/*",3
-    lambda route: route.abort()
-    if route.request.resource_type in ["image", "media", "font"]
-    else route.continue_()
-)
-```
-
----
-
-## Notes
-
-* All scripts are designed to **keep your credentials in memory only**.
-* PDF ordering after conversion relies on **existing filenames**, no renaming is done automatically.
-* iLovePDF free version limits batch conversion to **3 files at a time**; `file_conversion.py` automatically batches files.
-
----
+Would you like me to generate a `requirements.txt` file or a setup script to initialize this environment?
