@@ -15,7 +15,7 @@ The system utilizes `Playwright` for high-precision browser automation to handle
 * **Session Management**: Securely authenticates user credentials and maintains session persistence using `.env` configurations.
 * **Intelligent Navigation**: Programmatically traverses course hierarchies, selecting specific units and iterating through slide-based content.
 * **Multi-Format Extraction**: Simultaneously identifies and retrieves Presentation Slides, Supplementary Notes, and Question Banks (QB).
-* **AV Summary Resolution**: Implements a custom logic to resolve and download direct MP4 streams and Vimeo-hosted video content.
+* **AV Summary Resolution**: Implements custom logic to resolve and download direct MP4 streams and Vimeo-hosted video content.
 
 ### 2. Batch Presentation Conversion
 
@@ -43,8 +43,62 @@ The merging module provides sophisticated file-handling to organize all download
 | **Automation Engine** | `automate.py` | Handles DOM interaction, login sequences, and scraping. |
 | **Conversion Logic** | `file_conversion.py` | Manages PPTX-to-PDF transformations and ZIP extraction. |
 | **PDF Processor** | `merge.py` | Executes PDF merging and source file cleanup. |
-| **Configuration** | `config.py` | Persists credentials and user preferences across sessions. |
+| **Configuration** | `config.py` | Persists credentials and user preferences via `.env`. |
 | **Debugging** | `debugging.py` | Provides hooks for console, network, and DOM event logging. |
+
+---
+
+## Installation & Setup Instructions
+
+### Prerequisites
+
+* **Python 3.8+** installed on your system.
+* **Git** (optional, for cloning).
+
+### 1. Windows Setup
+
+1. Open **PowerShell** or **Command Prompt**.
+2. Navigate to the project directory.
+3. Install dependencies:
+```powershell
+pip install -r requirements.txt
+playwright install chromium
+
+```
+
+
+
+### 2. macOS Setup
+
+1. Open **Terminal**.
+2. Navigate to the project directory.
+3. Install dependencies:
+```bash
+pip3 install -r requirements.txt
+python3 -m playwright install chromium
+
+```
+
+
+
+### 3. Linux Setup
+
+1. Open your terminal.
+2. Install system dependencies for Playwright:
+```bash
+sudo apt update && sudo apt install -y libgbm1 libasound2
+
+```
+
+
+3. Install Python packages and browser binaries:
+```bash
+pip3 install -r requirements.txt
+python3 -m playwright install chromium
+
+```
+
+
 
 ---
 
@@ -57,4 +111,5 @@ Upon successful execution, the system generates a structured directory named acc
 * **Supplementary Material**: Organized subdirectories for Notes and Question Banks if selected during the prompt.
 * **Configuration State**: An updated `.env` file reflecting your saved credentials and process preferences (e.g., `MERGE_PDFS=1`).
 
-Would you like me to generate a `requirements.txt` file or a setup script to initialize this environment?
+---
+
