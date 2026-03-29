@@ -5,7 +5,6 @@ import zipfile
 from playwright.sync_api import sync_playwright
 
 
-# File Helpers
 def unzip_and_flatten(zip_path, destination):
     extract_dir = os.path.join(destination, "unzipped_temp")
     os.makedirs(extract_dir, exist_ok=True)
