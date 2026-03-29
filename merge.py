@@ -6,6 +6,7 @@ from dotenv import set_key, dotenv_values
 
 ENV_FILE = ".env"
 
+
 def get_unique_output_path(folder, base_name):
     name, ext = os.path.splitext(base_name)
     ext = ext or ".pdf"
