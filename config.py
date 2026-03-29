@@ -4,6 +4,7 @@ from dotenv import load_dotenv, set_key
 
 
 ENV_FILE = ".env"
+
 ENV_EXAMPLE_FILE = ".env.example"
 
 # Load .env file if it exists
