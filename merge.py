@@ -13,7 +13,7 @@ def get_unique_output_path(folder, base_name):
     candidate = f"{name}{ext}"
     counter = 1
     while os.path.exists(os.path.join(folder, candidate)):
-        candidate = f"{name}[{counter}]{ext}"
+        candidate = f"{name}_{counter}{ext}"
         counter += 1
     return os.path.join(folder, candidate)
 
@@ -21,10 +21,9 @@ def merge(folder, include_qb, output_name=None):
     if not os.path.exists(folder) or not os.path.isdir(folder):
         print(f"Folder doesn't exist: {folder}")
         return
-
     slide_pdfs = [
         f for f in os.listdir(folder)
-        if f.lower().endswith(".pdf") and f.startswith("Slide_")
+        if f.lower().endswith(".pdf") and not f.startswith("merged")
     ]
 
     qb_pdfs = []
@@ -33,20 +32,26 @@ def merge(folder, include_qb, output_name=None):
         if os.path.exists(qb_folder):
             qb_pdfs = [
                 f for f in os.listdir(qb_folder)
-                if f.lower().endswith(".pdf") and f.startswith("QB_")
+                if f.lower().endswith(".pdf")
             ]
 
     def sort_key(x):
-        m = re.search(r'\d+', x)
-        return int(m.group()) if m else float("inf")
+        match = re.match(r'^QB_(\d+)_', x)
+        if match:
+            return (0, int(match.group(1)))
 
-    slide_pdfs = sorted(slide_pdfs, key=sort_key)
-    qb_pdfs = sorted(qb_pdfs, key=sort_key)
+        match = re.match(r'^(\d+)_', x)
+        if match:
+            return (1, int(match.group(1)))
 
-    all_files = [(os.path.join(folder, f), f) for f in slide_pdfs]
-    if include_qb:
-        qb_folder = os.path.join(folder, "QB")
-        all_files += [(os.path.join(qb_folder, f), f) for f in qb_pdfs]
+        return (2, float("inf"))
+
+    slide_files = [(os.path.join(folder, f), f) for f in slide_pdfs]
+    qb_files = [(os.path.join(folder, "QB", f), f) for f in qb_pdfs]
+
+    all_files = slide_files + qb_files
+
+    all_files.sort(key=lambda item: sort_key(item[1]))
 
     if len(all_files) < 2:
         print("Not enough PDFs to merge.")
@@ -59,11 +64,15 @@ def merge(folder, include_qb, output_name=None):
 
     output_path = get_unique_output_path(folder, output_name)
     merger = PdfMerger()
-    for path, _ in all_files:
+
+    print("\nMerging Order:")
+    for path, name in all_files:
+        print(f" - {name}")
         merger.append(path)
+
     merger.write(output_path)
     merger.close()
-    print(f"Merged PDF created → {output_path}")
+    print(f"\nMerged PDF created -> {output_path}")
 
 def ask_and_merge_pdfs(folder, output_name=None):
     values = dotenv_values(ENV_FILE) if os.path.exists(ENV_FILE) else {}
@@ -107,8 +116,9 @@ def ask_and_merge_pdfs(folder, output_name=None):
         set_key(ENV_FILE, "MERGE_PDFS", "-1")
 
 def delete_non_merged(folder, include_qb):
+    # Delete slides (pattern {index}_Topic.pdf)
     for filename in os.listdir(folder):
-        if filename.endswith(".pdf") and filename.startswith("Slide_") and "merged" not in filename.lower():
+        if filename.endswith(".pdf") and re.match(r'^\d+_', filename) and "merged" not in filename.lower():
             filepath = os.path.join(folder, filename)
             os.remove(filepath)
             print(f"Deleted file: {filepath}")
@@ -117,7 +127,7 @@ def delete_non_merged(folder, include_qb):
         qb_folder = os.path.join(folder, "QB")
         if os.path.exists(qb_folder):
             for filename in os.listdir(qb_folder):
-                if filename.endswith(".pdf") and filename.startswith("QB_"):
+                if filename.endswith(".pdf"):
                     filepath = os.path.join(qb_folder, filename)
                     os.remove(filepath)
                     print(f"Deleted file: {filepath}")
