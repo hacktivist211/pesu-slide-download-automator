@@ -6,7 +6,10 @@ ENV_FILE = ".env"
 downloaded_urls = set()
 
 def sanitize(name: str):
-    return re.sub(r"[^\w\- ]", "", name).strip()
+    # Keep filesystem safe, allow spaces and hyphens
+    # Replace multiple spaces with single space
+    cleaned = re.sub(r"[^\w\- ]", "", name)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 def login(page, username, password):
     page.goto("https://www.pesuacademy.com/Academy/")
@@ -67,6 +70,13 @@ def open_first_slide(page):
     page.wait_for_timeout(800)
     print("Clicked first slide entry.")
 
+def _ffmpeg_available():
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=5)
+        return result.returncode == 0
+    except Exception:
+        return False
+
 def _yt_dlp_available():
     try:
         result = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True, timeout=5)
@@ -81,12 +91,42 @@ def _aria2c_available():
     except Exception:
         return False
 
+def _download_with_ffmpeg(stream_url, output_path, headers=None):
+    cmd = [
+        "ffmpeg", "-y",
+        "-loglevel", "warning",
+    ]
+    if headers:
+        header_str = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+        cmd += ["-headers", header_str]
+
+    if ".m3u8" in stream_url:
+        cmd += ["-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls"]
+
+    cmd += [
+        "-i", stream_url,
+        "-c", "copy",
+        "-movflags", "+faststart",
+        "-bsf:a", "aac_adtstoasc",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, timeout=900)
+        return True
+    except subprocess.TimeoutExpired:
+        print("  ffmpeg timed out.")
+        return False
+    except Exception as e:
+        print(f"  ffmpeg error: {e}")
+        return False
+
 def _download_with_ytdlp(url, output_path, extra_args=None):
     if _aria2c_available():
         cmd = [
             "yt-dlp",
             "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
+            "--format-sort", "+res,+fps,+vbr,+abr",
             "-o", output_path,
             "--no-playlist",
             "--downloader", "aria2c",
@@ -97,6 +137,7 @@ def _download_with_ytdlp(url, output_path, extra_args=None):
             "yt-dlp",
             "-f", "bestvideo[proto=dash][ext=mp4]+bestaudio[proto=dash][ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
+            "--format-sort", "+res,+fps,+vbr,+abr",
             "-o", output_path,
             "--no-playlist",
             "--concurrent-fragments", "16",
@@ -106,31 +147,37 @@ def _download_with_ytdlp(url, output_path, extra_args=None):
         cmd += extra_args
     cmd.append(url)
     try:
-        result = subprocess.run(cmd, timeout=600)
-        return result.returncode == 0
+        subprocess.run(cmd, timeout=600)
+        return True
     except subprocess.TimeoutExpired:
-        print("yt-dlp timed out.")
+        print("  yt-dlp timed out.")
         return False
     except Exception as e:
-        print(f"yt-dlp error: {e}")
+        print(f"  yt-dlp error: {e}")
         return False
 
 def intercept_and_download_vimeo(page, vimeo_id, output_path):
-    captured = {"url": None}
+    captured = {"m3u8": None, "mpd":  None, "mp4":  None}
+    referer = f"https://player.vimeo.com/video/{vimeo_id}"
+    origin  = "https://player.vimeo.com"
 
     def handle_response(response):
         url = response.url
-        if captured["url"]:
+        if "vimeocdn" not in url and "vimeo.com" not in url:
             return
-        if ("vimeocdn" in url or "vimeo.com" in url) and vimeo_id in url:
-            if ".m3u8" in url:
-                captured["url"] = url
-            elif ".mp4" in url:
-                captured["url"] = url
+        if ".m3u8" in url and not captured["m3u8"]:
+            if "/sep/" not in url and not re.search(r'seg-\d+', url):
+                captured["m3u8"] = url
+                print(f"  [Intercept] HLS master: {url[:90]}...")
+        elif ".mpd" in url and not captured["mpd"]:
+            captured["mpd"] = url
+            print(f"  [Intercept] DASH manifest: {url[:90]}...")
+        elif ".mp4" in url and not captured["mp4"] and "fragment" not in url:
+            captured["mp4"] = url
+            print(f"  [Intercept] Direct MP4: {url[:90]}...")
 
     page.on("response", handle_response)
-
-    player_url = f"https://player.vimeo.com/video/{vimeo_id}?autoplay=1&muted=1"
+    player_url = f"https://player.vimeo.com/video/{vimeo_id}?autoplay=1&muted=1&quality=1080p"
     try:
         page.evaluate(f"""
             (() => {{
@@ -139,31 +186,127 @@ def intercept_and_download_vimeo(page, vimeo_id, output_path):
                 const iframe = document.createElement('iframe');
                 iframe.id = '_vimeo_intercept_frame';
                 iframe.src = '{player_url}';
-                iframe.allow = 'autoplay';
-                iframe.style.cssText = 'width:1px;height:1px;position:absolute;opacity:0;';
+                iframe.allow = 'autoplay; fullscreen';
+                iframe.style.cssText = 'width:640px;height:360px;position:absolute;left:-9999px;top:0;';
                 document.body.appendChild(iframe);
             }})()
         """)
-        page.wait_for_timeout(6000)
+        for _ in range(30):
+            if captured["m3u8"] or captured["mpd"] or captured["mp4"]:
+                break
+            page.wait_for_timeout(500)
     except Exception as e:
-        print(f"Intercept iframe inject error: {e}")
+        print(f"  Intercept iframe error: {e}")
 
     page.remove_listener("response", handle_response)
-
     page.evaluate("(() => { const f = document.getElementById('_vimeo_intercept_frame'); if(f) f.remove(); })()")
 
-    if not captured["url"]:
+    stream_url = captured["m3u8"] or captured["mpd"] or captured["mp4"]
+    if not stream_url:
+        print("  No stream URL intercepted.")
         return False
 
-    print(f"Intercepted stream URL, downloading via yt-dlp...")
-    referer = f"https://player.vimeo.com/video/{vimeo_id}"
-    return _download_with_ytdlp(
-        captured["url"],
-        output_path,
-        extra_args=["--add-header", f"Referer:{referer}"]
-    )
+    headers = {"Referer": referer, "Origin": origin}
 
-def download_av_summaries(page, course_name, unit_name, downloaded_urls):
+    if _ffmpeg_available():
+        print(f"  Downloading via ffmpeg...")
+        if _download_with_ffmpeg(stream_url, output_path, headers=headers):
+            return True
+        print("  ffmpeg failed, falling back to yt-dlp...")
+
+    if _yt_dlp_available():
+        print(f"  Downloading via yt-dlp...")
+        return _download_with_ytdlp(stream_url, output_path, extra_args=["--add-header", f"Referer:{referer}", "--add-header", f"Origin:{origin}"])
+
+    print("  Neither ffmpeg nor yt-dlp is available.")
+    return False
+
+def get_unique_filename(folder, base_name, ext):
+    """
+    Rule 9: Append suffix AFTER topic using underscores, not brackets.
+    """
+    candidate = f"{base_name}{ext}"
+    counter = 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        candidate = f"{base_name}_{counter}{ext}"
+        counter += 1
+    return candidate
+
+def get_page_topic(page):
+    """
+    Extracts the topic name from the current page.
+    Prioritizes H1, H2, and specific content headers.
+    Filters out generic labels like 'Slides', 'Notes', etc.
+    """
+
+    BLACKLIST_WORDS = {
+        "profile", "back to units", "my courses", "mycourses", "home",
+        "logout", "settings", "pesu", "academy", "login",
+        "slides", "notes", "question bank", "qb", "av summary",
+        "live videos", "class", "content"
+    }
+
+    def _is_blacklisted(text: str) -> bool:
+        low = text.lower().strip()
+        if low in BLACKLIST_WORDS:
+            return True
+        return any(b in low for b in BLACKLIST_WORDS)
+
+    # 1. Try main headers (h1, h2) - Most reliable for PESU course pages
+    main_header_selectors = ["h1", "h2", "h3", ".page-header", ".panel-title", "#heading"]
+
+    for sel in main_header_selectors:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible():
+                text = el.inner_text().strip()
+                # Must be substantive text, not generic labels
+                if text and len(text) >= 3 and not _is_blacklisted(text):
+                    return sanitize(text)
+        except Exception:
+            continue
+
+    # 2. Try specific content containers if headers fail
+    content_selectors = [
+        ".coursecontent-header h3",
+        ".coursecontent-header h4",
+        ".coursecontent-header h2",
+        "#coursecontentarea h3",
+        "#coursecontentarea h4",
+        "#coursecontentarea h2",
+    ]
+    for sel in content_selectors:
+        try:
+            els = page.locator(sel)
+            for j in range(els.count()):
+                el = els.nth(j)
+                if not el.is_visible():
+                    continue
+                text = el.inner_text().strip()
+                if text and len(text) >= 3 and not _is_blacklisted(text):
+                    return sanitize(text)
+        except Exception:
+            continue
+
+    # 3. Try to infer from active sidebar item (last resort)
+    sidebar_selectors = [
+        "#courselistunit li.active a",
+        "#courselistunit li.active",
+        ".topic-list li.active a",
+    ]
+    for sel in sidebar_selectors:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0:
+                text = el.inner_text().strip()
+                if text and len(text) >= 3 and not _is_blacklisted(text):
+                    return sanitize(text)
+        except Exception:
+            continue
+
+    return ""
+
+def download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=None, topic_index=0):
     page.wait_for_timeout(800)
     av_tab = page.locator("text='AV Summary'").first
     if not av_tab.is_visible():
@@ -209,122 +352,76 @@ def download_av_summaries(page, course_name, unit_name, downloaded_urls):
     folder = os.path.join(f"{course_name} {unit_name}", "AV_Summaries")
     os.makedirs(folder, exist_ok=True)
 
-    existing = []
-    for f in os.listdir(folder):
-        match = re.search(r'\d+', f)
-        if match:
-            existing.append(int(match.group()))
-    next_number = max(existing) + 1 if existing else 1
+    # Fallback if topic is empty
+    safe_topic = sanitize(topic) if topic else f"{course_name}_Topic_{topic_index}"
+    if not topic:
+        print(f"[Warning] Topic extraction failed for video, using fallback: {safe_topic}")
 
-    ytdlp_ok = _yt_dlp_available()
-    if not ytdlp_ok:
-        print("WARNING: yt-dlp not found. Install with: pip install yt-dlp")
-        print("All Vimeo videos will be skipped.")
+    def _make_av_filename(base_topic, counter, total_on_page):
+        if total_on_page == 1:
+            return f"{base_topic}.mp4"
+        else:
+            return f"{base_topic}_{counter}.mp4"
+
+    ffmpeg_ok = _ffmpeg_available()
+    ytdlp_ok  = _yt_dlp_available()
+    page_video_counter = 0
 
     for vid_id in vimeo_ids:
         if vid_id in downloaded_urls:
             print(f"Already downloaded Vimeo {vid_id}, skipping.")
             continue
-        if not ytdlp_ok:
-            print(f"Skipping Vimeo {vid_id} (yt-dlp unavailable).")
+        if not ffmpeg_ok and not ytdlp_ok:
+            print(f"Skipping Vimeo {vid_id} (no download tool available).")
             continue
+
+        page_video_counter += 1
         print(f"\nDownloading Vimeo {vid_id}...")
-        filename = f"AV_{next_number}.mp4"
+
+        base_name = _make_av_filename(safe_topic, page_video_counter, total)
+        filename = get_unique_filename(folder, base_name.replace(".mp4", ""), ".mp4")
         filepath = os.path.join(folder, filename)
 
-        vimeo_url = f"https://vimeo.com/{vid_id}"
-        success = _download_with_ytdlp(vimeo_url, filepath)
+        success = intercept_and_download_vimeo(page, vid_id, filepath)
 
-        if not success:
-            print(f"Direct Vimeo URL failed (domain-locked). Trying page intercept...")
-            success = intercept_and_download_vimeo(page, vid_id, filepath)
-
-        if success and os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+        if success and os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
             print(f"Saved -> {filepath}")
             downloaded_urls.add(vid_id)
-            next_number += 1
         else:
-            print(f"Could not download Vimeo {vid_id}.")
+            print(f"Could not download Vimeo {vid_id} or file corrupted.")
             if os.path.exists(filepath):
                 os.remove(filepath)
+            page_video_counter -= 1
 
     for url in direct_mp4_urls:
         if url in downloaded_urls:
             continue
+        page_video_counter += 1
         print(f"\nDownloading: {url}")
         try:
             resp = page.request.get(url)
             if resp.status != 200:
                 print(f"Failed ({resp.status})")
+                page_video_counter -= 1
                 continue
-            filename = f"AV_{next_number}.mp4"
+
+            base_name = _make_av_filename(safe_topic, page_video_counter, total)
+            filename = get_unique_filename(folder, base_name.replace(".mp4", ""), ".mp4")
             filepath = os.path.join(folder, filename)
+
             with open(filepath, "wb") as f:
                 f.write(resp.body())
-            print(f"Saved -> {filepath}")
-            downloaded_urls.add(url)
-            next_number += 1
+
+            if os.path.getsize(filepath) < 1024:
+                print("File too small, possibly corrupted.")
+                os.remove(filepath)
+                page_video_counter -= 1
+            else:
+                print(f"Saved -> {filepath}")
+                downloaded_urls.add(url)
         except Exception as e:
             print(f"Error downloading {url}: {e}")
-
-def get_page_topic(page):
-    selectors = [
-        ".coursecontent-header h3",
-        ".coursecontent-header h4",
-        ".coursecontent-header h2",
-        ".coursecontent-header h1",
-        ".coursecontent-body h3",
-        ".coursecontent-body h4",
-        ".coursecontent-body h2",
-        "#coursecontentarea h3",
-        "#coursecontentarea h4",
-        "#coursecontentarea h2",
-        ".slide-title",
-        ".content-title",
-    ]
-    blacklist = {"profile", "back to units", "my courses", "home", "logout", "settings"}
-    for sel in selectors:
-        try:
-            els = page.locator(sel)
-            for j in range(els.count()):
-                el = els.nth(j)
-                if not el.is_visible():
-                    continue
-                text = el.inner_text().strip()
-                if not text or len(text) < 3:
-                    continue
-                if text.lower() in blacklist:
-                    continue
-                if any(b in text.lower() for b in blacklist):
-                    continue
-                return sanitize(text)
-        except Exception:
-            continue
-
-    try:
-        title_tag = page.title()
-        if title_tag and len(title_tag) > 2:
-            parts = re.split(r"[|\-]", title_tag)
-            for part in parts:
-                candidate = sanitize(part.strip())
-                if not candidate or len(candidate) < 3:
-                    continue
-                low = candidate.lower()
-                if any(b in low for b in ("pesu", "academy", "profile", "login")):
-                    continue
-                return candidate
-    except Exception:
-        pass
-
-    return ""
-
-def get_unique_filename(folder, base_name, ext):
-    candidate = f"{base_name}{ext}"
-    counter = 1
-    while os.path.exists(os.path.join(folder, candidate)):
-        candidate = f"{base_name}[{counter}]{ext}"
-        counter += 1
-    return candidate
+            page_video_counter -= 1
 
 def _extract_direct_pdf_url(iframe_url):
     import urllib.parse
@@ -346,7 +443,7 @@ def _extract_direct_pdf_url(iframe_url):
                 return "https://www.pesuacademy.com" + candidate
     return None
 
-def download_content(page, course_name, unit_name, downloaded_urls, category="Slide", topic_override=None):
+def download_content(page, course_name, unit_name, downloaded_urls, category="Slide", topic_override=None, topic_index=0):
     page.wait_for_timeout(800)
 
     tab_map = {
@@ -377,19 +474,12 @@ def download_content(page, course_name, unit_name, downloaded_urls, category="Sl
 
     os.makedirs(folder, exist_ok=True)
 
-    existing = []
-    for f in os.listdir(folder):
-        if f.startswith(category):
-            match = re.search(r'\d+', f)
-            if match:
-                existing.append(int(match.group()))
-    next_number = max(existing) + 1 if existing else 101
+    # Fallback if topic_override is empty
+    safe_topic = sanitize(topic_override) if topic_override else f"{course_name}_Topic_{topic_index}"
+    if not topic_override:
+        print(f"[Warning] Topic extraction failed for {category}, using fallback: {safe_topic}")
 
-    topic = topic_override
-    if topic:
-        topic = sanitize(topic)
-        if "Back to Units" in topic:
-            topic = None
+    file_counter = 1
 
     for i in range(count):
         item = items.nth(i)
@@ -451,18 +541,42 @@ def download_content(page, course_name, unit_name, downloaded_urls, category="Sl
             else:
                 ext = ".pdf"
 
-            if category == "Slide" and topic:
-                base_name = f"Slide_{topic}" if count == 1 else f"Slide_{topic}_{next_number}"
+            if category == "Slide":
+                suffix = "" if count == 1 else f"_{file_counter}"
+                base_name = f"{topic_index:03d}_{safe_topic}{suffix}"
+            elif category == "QB":
+                base_name = f"QB_{topic_index:03d}_{safe_topic}"
+            elif category == "Note":
+                base_name = f"Note_{topic_index:03d}_{safe_topic}"
             else:
-                base_name = f"{category}_{next_number}"
+                base_name = f"{category}_{topic_index:03d}"
 
             filename = get_unique_filename(folder, base_name, ext)
             filepath = os.path.join(folder, filename)
             with open(filepath, "wb") as f:
                 f.write(body)
+
+            valid = False
+            try:
+                if ext == ".pdf" and body[:4] == b"%PDF":
+                    valid = True
+                elif ext in (".pptx", ".docx") and body[:2] == b"PK":
+                    valid = True
+                else:
+                    valid = True
+            except Exception:
+                pass
+
+            if not valid:
+                os.remove(filepath)
+                snippet = body[:200].decode("utf-8", errors="replace")
+                print(f"[ERROR] File failed validation and was deleted: {filename}")
+                print(f"  First 200 bytes: {snippet!r}")
+                continue
+
             print(f"Saved -> {filepath}")
             downloaded_urls.add(file_url)
-            next_number += 1
+            file_counter += 1
             page.wait_for_timeout(300)
 
 def navigate_through_pages(page, course_name, unit_name, downloaded_urls, fetch_videos, fetch_notes, fetch_qb):
@@ -470,6 +584,7 @@ def navigate_through_pages(page, course_name, unit_name, downloaded_urls, fetch_
     last_button_label = None
     stuck_count = 0
     MAX_STUCK = 3
+    topic_index = 0
 
     while True:
         page.wait_for_selector(".coursecontent-navigation-area a.pull-right", timeout=15000)
@@ -477,16 +592,16 @@ def navigate_through_pages(page, course_name, unit_name, downloaded_urls, fetch_
         label = next_button.inner_text().strip()
         current_url = page.url
 
+        # Extract Topic Name
         topic = get_page_topic(page)
 
+        # Fallback Logic
         if not topic:
-            url_slug = current_url.rstrip("/").split("/")[-1]
-            url_slug = re.sub(r"%20|[_\-]+", " ", url_slug)
-            candidate = sanitize(url_slug).strip()
-            if candidate and "Back to Units" not in candidate and len(candidate) > 2:
-                topic = candidate
+            topic = f"{course_name}*Topic*{topic_index + 1}"
+            print(f"[Warning] Topic name not found, using fallback: {topic}")
 
-        print(f"\nCurrent Page: {topic if topic else 'Unknown Topic'}")
+        topic_index += 1
+        print(f"\nCurrent Page: {topic}")
 
         if current_url == last_url and label == last_button_label:
             stuck_count += 1
@@ -500,15 +615,15 @@ def navigate_through_pages(page, course_name, unit_name, downloaded_urls, fetch_
             last_button_label = label
 
             if fetch_videos:
-                download_av_summaries(page, course_name, unit_name, downloaded_urls)
+                download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=topic, topic_index=topic_index)
 
-            download_content(page, course_name, unit_name, downloaded_urls, "Slide", topic_override=topic)
+            download_content(page, course_name, unit_name, downloaded_urls, "Slide", topic_override=topic, topic_index=topic_index)
 
             if fetch_notes:
-                download_content(page, course_name, unit_name, downloaded_urls, "Note")
+                download_content(page, course_name, unit_name, downloaded_urls, "Note", topic_override=topic, topic_index=topic_index)
 
             if fetch_qb:
-                download_content(page, course_name, unit_name, downloaded_urls, "QB")
+                download_content(page, course_name, unit_name, downloaded_urls, "QB", topic_override=topic, topic_index=topic_index)
 
         if "Back to Units" in label:
             print("Reached 'Back to Units'. Stopping navigation.")
