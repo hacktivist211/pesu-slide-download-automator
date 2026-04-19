@@ -37,9 +37,8 @@ def merge(folder, include_qb, output_name=None):
             ]
 
     def sort_key(x):
-        # Match the leading number in filenames like Slide_001_TopicName.pdf or Slide_1.pdf
-        m = re.match(r'[A-Za-z]+_(\d+)', x)
-        return int(m.group(1)) if m else float("inf")
+        m = re.search(r'\d+', x)
+        return int(m.group()) if m else float("inf")
 
     slide_pdfs = sorted(slide_pdfs, key=sort_key)
     qb_pdfs = sorted(qb_pdfs, key=sort_key)
