@@ -87,7 +87,6 @@ def _download_with_ytdlp(url, output_path, extra_args=None):
             "yt-dlp",
             "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
-            "--format-sort", "res,fps,vbr,abr",
             "-o", output_path,
             "--no-playlist",
             "--downloader", "aria2c",
@@ -98,7 +97,6 @@ def _download_with_ytdlp(url, output_path, extra_args=None):
             "yt-dlp",
             "-f", "bestvideo[proto=dash][ext=mp4]+bestaudio[proto=dash][ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "--merge-output-format", "mp4",
-            "--format-sort", "res,fps,vbr,abr",
             "-o", output_path,
             "--no-playlist",
             "--concurrent-fragments", "16",
@@ -165,7 +163,7 @@ def intercept_and_download_vimeo(page, vimeo_id, output_path):
         extra_args=["--add-header", f"Referer:{referer}"]
     )
 
-def download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=None):
+def download_av_summaries(page, course_name, unit_name, downloaded_urls):
     page.wait_for_timeout(800)
     av_tab = page.locator("text='AV Summary'").first
     if not av_tab.is_visible():
@@ -211,29 +209,17 @@ def download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=N
     folder = os.path.join(f"{course_name} {unit_name}", "AV_Summaries")
     os.makedirs(folder, exist_ok=True)
 
-    # Count existing files to determine the next global sequence number for this folder
-    existing_count = len([f for f in os.listdir(folder) if f.lower().endswith(".mp4")])
-    # topic_counter tracks how many videos have been saved for the current topic (for _2, _3 suffixes)
-    topic_counter = existing_count + 1
+    existing = []
+    for f in os.listdir(folder):
+        match = re.search(r'\d+', f)
+        if match:
+            existing.append(int(match.group()))
+    next_number = max(existing) + 1 if existing else 1
 
     ytdlp_ok = _yt_dlp_available()
     if not ytdlp_ok:
         print("WARNING: yt-dlp not found. Install with: pip install yt-dlp")
         print("All Vimeo videos will be skipped.")
-
-    def _make_av_filename(topic_name, counter, total_on_page):
-        """Build a filename: TopicName.mp4 if only 1 video, else TopicName_2.mp4, TopicName_3.mp4 …"""
-        safe_topic = sanitize(topic_name) if topic_name else f"AV_Summary"
-        if total_on_page == 1:
-            base = safe_topic
-        else:
-            # First video keeps bare topic name, subsequent ones get _2, _3, ...
-            suffix = "" if counter == 1 else f"_{counter}"
-            base = f"{safe_topic}{suffix}"
-        # Ensure uniqueness in folder
-        return get_unique_filename(folder, base, ".mp4")
-
-    page_video_counter = 0  # how many videos downloaded on this page so far
 
     for vid_id in vimeo_ids:
         if vid_id in downloaded_urls:
@@ -242,9 +228,8 @@ def download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=N
         if not ytdlp_ok:
             print(f"Skipping Vimeo {vid_id} (yt-dlp unavailable).")
             continue
-        page_video_counter += 1
         print(f"\nDownloading Vimeo {vid_id}...")
-        filename = _make_av_filename(topic, page_video_counter, total)
+        filename = f"AV_{next_number}.mp4"
         filepath = os.path.join(folder, filename)
 
         vimeo_url = f"https://vimeo.com/{vid_id}"
@@ -257,32 +242,30 @@ def download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=N
         if success and os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             print(f"Saved -> {filepath}")
             downloaded_urls.add(vid_id)
+            next_number += 1
         else:
             print(f"Could not download Vimeo {vid_id}.")
             if os.path.exists(filepath):
                 os.remove(filepath)
-            page_video_counter -= 1  # don't count failed downloads
 
     for url in direct_mp4_urls:
         if url in downloaded_urls:
             continue
-        page_video_counter += 1
         print(f"\nDownloading: {url}")
         try:
             resp = page.request.get(url)
             if resp.status != 200:
                 print(f"Failed ({resp.status})")
-                page_video_counter -= 1
                 continue
-            filename = _make_av_filename(topic, page_video_counter, total)
+            filename = f"AV_{next_number}.mp4"
             filepath = os.path.join(folder, filename)
             with open(filepath, "wb") as f:
                 f.write(resp.body())
             print(f"Saved -> {filepath}")
             downloaded_urls.add(url)
+            next_number += 1
         except Exception as e:
             print(f"Error downloading {url}: {e}")
-            page_video_counter -= 1
 
 def get_page_topic(page):
     selectors = [
@@ -400,7 +383,7 @@ def download_content(page, course_name, unit_name, downloaded_urls, category="Sl
             match = re.search(r'\d+', f)
             if match:
                 existing.append(int(match.group()))
-    next_number = max(existing) + 1 if existing else 1
+    next_number = max(existing) + 1 if existing else 101
 
     topic = topic_override
     if topic:
@@ -468,15 +451,10 @@ def download_content(page, course_name, unit_name, downloaded_urls, category="Sl
             else:
                 ext = ".pdf"
 
-            if category == "Slide":
-                safe_topic = sanitize(topic) if topic else "Unknown"
-                base_name = f"Slide_{next_number:03d}_{safe_topic}"
-            elif category == "QB" and topic:
-                base_name = f"QB_{next_number:03d}_{sanitize(topic)}"
-            elif category == "Note" and topic:
-                base_name = f"Note_{next_number:03d}_{sanitize(topic)}"
+            if category == "Slide" and topic:
+                base_name = f"Slide_{topic}" if count == 1 else f"Slide_{topic}_{next_number}"
             else:
-                base_name = f"{category}_{next_number:03d}"
+                base_name = f"{category}_{next_number}"
 
             filename = get_unique_filename(folder, base_name, ext)
             filepath = os.path.join(folder, filename)
@@ -522,7 +500,7 @@ def navigate_through_pages(page, course_name, unit_name, downloaded_urls, fetch_
             last_button_label = label
 
             if fetch_videos:
-                download_av_summaries(page, course_name, unit_name, downloaded_urls, topic=topic)
+                download_av_summaries(page, course_name, unit_name, downloaded_urls)
 
             download_content(page, course_name, unit_name, downloaded_urls, "Slide", topic_override=topic)
 
