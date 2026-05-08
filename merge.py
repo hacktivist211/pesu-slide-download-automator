@@ -1,13 +1,57 @@
-import os
+"""
+merge.py – Merge PDFs per category (Slides, Notes, QB) independently.
+
+Each category is prompted (or preference-checked) separately.
+  - Slides  → merged inside <unit_root>/
+  - Notes   → merged inside <unit_root>/Notes/
+  - QB      → merged inside <unit_root>/QB/
+"""
+
 import argparse
+import logging
+import os
 import re
+
 from PyPDF2 import PdfMerger
 from dotenv import set_key, dotenv_values
 
+logger = logging.getLogger(__name__)
+
 ENV_FILE = ".env"
 
+# ---------------------------------------------------------------------------
+# Preference keys per category
+# ---------------------------------------------------------------------------
+_PREF_KEYS = {
+    "slides": "MERGE_SLIDES",
+    "notes":  "MERGE_NOTES",
+    "qb":     "MERGE_QB",
+}
+_KEEP_KEYS = {
+    "slides": "KEEP_ONLY_MERGED_SLIDES",
+    "notes":  "KEEP_ONLY_MERGED_NOTES",
+    "qb":     "KEEP_ONLY_MERGED_QB",
+}
 
-def get_unique_output_path(folder, base_name):
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _sort_key(filename: str) -> tuple:
+    m = re.match(r"^QB_(\d+)_", filename)
+    if m:
+        return (0, int(m.group(1)))
+    m = re.match(r"^Note_(\d+)_", filename)
+    if m:
+        return (1, int(m.group(1)))
+    m = re.match(r"^(\d+)_", filename)
+    if m:
+        return (2, int(m.group(1)))
+    return (3, float("inf"))
+
+
+def get_unique_output_path(folder: str, base_name: str) -> str:
     name, ext = os.path.splitext(base_name)
     ext = ext or ".pdf"
     candidate = f"{name}{ext}"
@@ -17,149 +61,200 @@ def get_unique_output_path(folder, base_name):
         counter += 1
     return os.path.join(folder, candidate)
 
-def merge(folder, include_qb, output_name=None):
-    if not os.path.exists(folder) or not os.path.isdir(folder):
-        print(f"Folder doesn't exist: {folder}")
-        return
-    slide_pdfs = [
+
+def _collect_pdfs(folder: str, exclude_prefix: str = "merged") -> list[str]:
+    """Return sorted list of PDF paths in `folder`, excluding already-merged files."""
+    if not os.path.isdir(folder):
+        return []
+    files = [
         f for f in os.listdir(folder)
-        if f.lower().endswith(".pdf") and not f.startswith("merged")
+        if f.lower().endswith(".pdf") and not f.lower().startswith(exclude_prefix)
     ]
+    files.sort(key=_sort_key)
+    return [os.path.join(folder, f) for f in files]
 
-    qb_pdfs = []
-    if include_qb:
-        qb_folder = os.path.join(folder, "QB")
-        if os.path.exists(qb_folder):
-            qb_pdfs = [
-                f for f in os.listdir(qb_folder)
-                if f.lower().endswith(".pdf")
-            ]
 
-    def sort_key(x):
-        match = re.match(r'^QB_(\d+)_', x)
-        if match:
-            return (0, int(match.group(1)))
+def _merge_files(pdf_paths: list[str], output_path: str) -> bool:
+    if len(pdf_paths) < 2:
+        logger.warning("Not enough PDFs to merge (need ≥ 2).")
+        return False
 
-        match = re.match(r'^(\d+)_', x)
-        if match:
-            return (1, int(match.group(1)))
+    logger.info("Merging order:")
+    for p in pdf_paths:
+        logger.info("  - %s", os.path.basename(p))
 
-        return (2, float("inf"))
-
-    slide_files = [(os.path.join(folder, f), f) for f in slide_pdfs]
-    qb_files = [(os.path.join(folder, "QB", f), f) for f in qb_pdfs]
-
-    all_files = slide_files + qb_files
-
-    all_files.sort(key=lambda item: sort_key(item[1]))
-
-    if len(all_files) < 2:
-        print("Not enough PDFs to merge.")
-        return
-
-    if not output_name:
-        output_name = "merged.pdf"
-    if not output_name.lower().endswith(".pdf"):
-        output_name += ".pdf"
-
-    output_path = get_unique_output_path(folder, output_name)
     merger = PdfMerger()
-
-    print("\nMerging Order:")
-    for path, name in all_files:
-        print(f" - {name}")
-        merger.append(path)
-
+    for p in pdf_paths:
+        merger.append(p)
     merger.write(output_path)
     merger.close()
-    print(f"\nMerged PDF created -> {output_path}")
+    logger.info("Merged PDF created -> %s", output_path)
+    return True
 
-def ask_and_merge_pdfs(folder, output_name=None):
-    values = dotenv_values(ENV_FILE) if os.path.exists(ENV_FILE) else {}
-    pref = values.get("MERGE_PDFS", None)
+
+def _delete_source_pdfs(pdf_paths: list[str]) -> None:
+    for path in pdf_paths:
+        try:
+            os.remove(path)
+            logger.debug("Deleted source: %s", path)
+        except Exception as e:
+            logger.error("Could not delete %s: %s", path, e)
+
+
+# ---------------------------------------------------------------------------
+# Per-category merge logic
+# ---------------------------------------------------------------------------
+
+def _get_pref(values: dict, category: str) -> str | None:
+    return values.get(_PREF_KEYS[category])
+
+
+def _ask_category_merge(
+    category: str,
+    folder: str,
+    values: dict,
+    output_name: str = "merged.pdf",
+) -> None:
+    """Handle merge prompt + execution for a single category."""
+    pref = _get_pref(values, category)
+
     if pref == "-1":
+        return  # "never ask again"
+
+    pdf_paths = _collect_pdfs(folder)
+    if not pdf_paths:
+        logger.info("No PDFs found in %s for category '%s'. Skipping.", folder, category)
         return
-
-    print("\nSelect Merge Scope:")
-    print("1. Combine Slides only")
-    print("2. Combine Slides AND Question Banks (QB)")
-    print("3. Do not merge")
-    scope_choice = input("Select option: ").strip()
-
-    if scope_choice == "3":
-        return
-
-    include_qb = scope_choice == "2"
 
     if pref == "1":
-        merge(folder, include_qb, output_name)
-        keep_only_merged(folder, include_qb)
+        # "always merge" saved preference
+        output_path = get_unique_output_path(folder, output_name)
+        if _merge_files(pdf_paths, output_path):
+            _maybe_delete_sources(category, pdf_paths, values)
         return
 
-    print("\nMerge selected PDFs into a single file?")
-    print("1. Always")
-    print("2. Yes")
-    print("3. No")
-    print("4. Don't ask again (always no)")
+    print(f"\n[{category.upper()}] Merge {len(pdf_paths)} PDF(s) in '{folder}'?")
+    print("  1. Always (save preference)")
+    print("  2. Yes")
+    print("  3. No")
+    print("  4. Never ask again for this category")
     choice = input("Select option: ").strip()
 
     if choice in ("1", "2"):
-        merge(folder, include_qb, output_name)
-        keep_only_merged(folder, include_qb)
+        output_path = get_unique_output_path(folder, output_name)
+        if _merge_files(pdf_paths, output_path):
+            _maybe_delete_sources(category, pdf_paths, values)
         if choice == "1":
-            set_key(ENV_FILE, "MERGE_PDFS", "1")
+            set_key(ENV_FILE, _PREF_KEYS[category], "1")
         else:
-            set_key(ENV_FILE, "MERGE_PDFS", "0")
+            set_key(ENV_FILE, _PREF_KEYS[category], "0")
     elif choice == "3":
-        set_key(ENV_FILE, "MERGE_PDFS", "0")
+        set_key(ENV_FILE, _PREF_KEYS[category], "0")
     elif choice == "4":
-        set_key(ENV_FILE, "MERGE_PDFS", "-1")
+        set_key(ENV_FILE, _PREF_KEYS[category], "-1")
 
-def delete_non_merged(folder, include_qb):
-    # Delete slides (pattern {index}_Topic.pdf)
-    for filename in os.listdir(folder):
-        if filename.endswith(".pdf") and re.match(r'^\d+_', filename) and "merged" not in filename.lower():
-            filepath = os.path.join(folder, filename)
-            os.remove(filepath)
-            print(f"Deleted file: {filepath}")
 
-    if include_qb:
-        qb_folder = os.path.join(folder, "QB")
-        if os.path.exists(qb_folder):
-            for filename in os.listdir(qb_folder):
-                if filename.endswith(".pdf"):
-                    filepath = os.path.join(qb_folder, filename)
-                    os.remove(filepath)
-                    print(f"Deleted file: {filepath}")
-
-def keep_only_merged(folder, include_qb):
-    values = dotenv_values(ENV_FILE) if os.path.exists(ENV_FILE) else {}
-    pref = values.get("KEEP_ONLY_MERGED", None)
-    if pref == "1":
-        delete_non_merged(folder, include_qb)
+def _maybe_delete_sources(category: str, pdf_paths: list[str], values: dict) -> None:
+    keep_pref = values.get(_KEEP_KEYS[category])
+    if keep_pref == "1":
+        _delete_source_pdfs(pdf_paths)
         return
-    if pref == "-1":
+    if keep_pref == "-1":
         return
-    print("\nKeep only merged PDF? (Source files will be deleted)")
-    print("1. Always")
-    print("2. Yes")
-    print("3. No")
-    print("4. Don't ask again (always no)")
+
+    print(f"\n[{category.upper()}] Keep only the merged PDF? (Source files will be deleted)")
+    print("  1. Always")
+    print("  2. Yes")
+    print("  3. No")
+    print("  4. Never ask again")
     choice = input("Select option: ").strip()
-    if choice == "1":
-        delete_non_merged(folder, include_qb)
-        set_key(ENV_FILE, "KEEP_ONLY_MERGED", "1")
-    elif choice == "2":
-        delete_non_merged(folder, include_qb)
-        set_key(ENV_FILE, "KEEP_ONLY_MERGED", "0")
+    if choice in ("1", "2"):
+        _delete_source_pdfs(pdf_paths)
+        if choice == "1":
+            set_key(ENV_FILE, _KEEP_KEYS[category], "1")
+        else:
+            set_key(ENV_FILE, _KEEP_KEYS[category], "0")
     elif choice == "3":
-        set_key(ENV_FILE, "KEEP_ONLY_MERGED", "0")
+        set_key(ENV_FILE, _KEEP_KEYS[category], "0")
     elif choice == "4":
-        set_key(ENV_FILE, "KEEP_ONLY_MERGED", "-1")
+        set_key(ENV_FILE, _KEEP_KEYS[category], "-1")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def ask_and_merge_pdfs(
+    unit_folder: str,
+    output_name: str | None = None,
+    skip_prompt: bool | None = None,
+) -> None:
+    """
+    Prompt (or auto-merge if skip_prompt=True) for each of:
+      - Slides  (unit_folder/*.pdf)
+      - Notes   (unit_folder/Notes/*.pdf)
+      - QB      (unit_folder/QB/*.pdf)
+
+    `skip_prompt=True`  → merge all categories automatically
+    `skip_prompt=False` → skip all (useful when --no-merge is passed)
+    `skip_prompt=None`  → use saved preferences / interactive prompts
+    """
+    if skip_prompt is False:
+        return
+
+    if not os.path.isdir(unit_folder):
+        logger.warning("Unit folder not found: %s", unit_folder)
+        return
+
+    values = dotenv_values(ENV_FILE) if os.path.exists(ENV_FILE) else {}
+
+    categories = [
+        ("slides", unit_folder,                             output_name or "merged.pdf"),
+        ("notes",  os.path.join(unit_folder, "Notes"),      "merged_notes.pdf"),
+        ("qb",     os.path.join(unit_folder, "QB"),         "merged_qb.pdf"),
+    ]
+
+    for category, folder, out_name in categories:
+        if not os.path.isdir(folder):
+            continue  # subfolder doesn't exist; nothing to merge
+
+        if skip_prompt is True:
+            # Auto-merge without asking
+            pdf_paths = _collect_pdfs(folder)
+            if len(pdf_paths) >= 2:
+                output_path = get_unique_output_path(folder, out_name)
+                _merge_files(pdf_paths, output_path)
+        else:
+            _ask_category_merge(category, folder, values, out_name)
+
+
+# ---------------------------------------------------------------------------
+# Direct-merge helper (no prompts, used programmatically)
+# ---------------------------------------------------------------------------
+
+def merge(folder: str, output_name: str | None = None) -> None:
+    """Merge all PDFs in `folder` into a single file (no prompts)."""
+    pdf_paths = _collect_pdfs(folder)
+    if not pdf_paths:
+        logger.warning("No PDFs found in: %s", folder)
+        return
+    out_name = output_name or "merged.pdf"
+    if not out_name.lower().endswith(".pdf"):
+        out_name += ".pdf"
+    output_path = get_unique_output_path(folder, out_name)
+    _merge_files(pdf_paths, output_path)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Merge PDFs in a folder")
-    parser.add_argument("--folder", required=True, help="Folder containing PDF files")
-    parser.add_argument("--output", help="Output PDF name (optional)")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    parser = argparse.ArgumentParser(description="Merge PDFs in a unit folder (Slides, Notes, QB)")
+    parser.add_argument("--folder", required=True, help="Unit folder path")
+    parser.add_argument("--output", help="Output PDF base name (optional)")
+    parser.add_argument("--auto", action="store_true", help="Merge all categories without prompting")
     args = parser.parse_args()
-    ask_and_merge_pdfs(args.folder, args.output)
+
+    ask_and_merge_pdfs(args.folder, output_name=args.output, skip_prompt=True if args.auto else None)
