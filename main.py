@@ -22,6 +22,8 @@ from automate import (
     login,
     get_all_courses,
     get_all_units,
+    get_available_semesters,
+    select_semester,
     navigate_through_pages,
     open_first_slide,
     sanitize,
@@ -146,11 +148,43 @@ def _pick_indices(prompt: str, items: list[str]) -> list[int]:
     return [int(x.strip()) - 1 for x in raw.split(",") if x.strip().isdigit()]
 
 
-def select_work_items(page, args) -> list[tuple[str, str]]:
+def select_semester_interactive(page, args) -> str | None:
     """
-    Returns a list of (course_name, unit_name) pairs to process.
+    Returns the semester label the user picked, or None to leave the
+    default (current) semester as-is.
+    """
+    semesters = get_available_semesters(page)
+    if not semesters:
+        return None
+
+    if args.semester:
+        if select_semester(page, args.semester):
+            return args.semester
+        logger.warning("Falling back to default semester.")
+        return None
+
+    print("\nAvailable Semesters:")
+    for i, s in enumerate(semesters, 1):
+        print(f"  {i}. {s}")
+    choice = input("\nEnter semester number (Enter to keep current): ").strip()
+    if not choice.isdigit():
+        return None
+    idx = int(choice) - 1
+    if not (0 <= idx < len(semesters)):
+        return None
+    label = semesters[idx]
+    select_semester(page, label)
+    return label
+
+
+def select_work_items(page, args) -> tuple[list[tuple[str, str]], str | None]:
+    """
+    Returns (work_items, semester_label).
+    work_items is a list of (course_name, unit_name) pairs to process.
     Respects --multi CLI flag or prompts interactively.
     """
+    semester_label = select_semester_interactive(page, args)
+
     # Determine mode
     if args.multi:
         mode = args.multi  # "single" | "multi_unit" | "multi_course"
@@ -228,8 +262,10 @@ def select_work_items(page, args) -> list[tuple[str, str]]:
             # Go back to course list
             page.go_back()
             page.wait_for_load_state("networkidle")
+            if semester_label:
+                select_semester(page, semester_label)
 
-    return work_items
+    return work_items, semester_label
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +284,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--debug", action="store_true", help="Enable debug logging and Playwright hooks")
     p.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     p.add_argument("--download-dir", dest="download_dir", help="Override download directory")
+    p.add_argument("--semester", help="Semester label to select, e.g. 'Sem-4' (default: current)")
     return p
 
 
@@ -272,6 +309,7 @@ def main() -> None:
     fetch_videos, fetch_notes, fetch_qb = get_download_options(args)
 
     work_items: list[tuple[str, str]] = []  # populated inside playwright context
+    semester_label: str | None = None
 
     while True:  # outer loop for "Did you miss anything?"
         completed_folders: list[tuple[str, str, str]] = []  # (course, unit, folder)
@@ -287,7 +325,7 @@ def main() -> None:
                 login(page, username, password)
 
                 if not work_items:
-                    work_items = select_work_items(page, args)
+                    work_items, semester_label = select_work_items(page, args)
 
                 topic_checkpoint: dict = checkpoint.get("topics", {})
 
@@ -300,7 +338,7 @@ def main() -> None:
                     logger.info("=== Processing: %s / %s ===", course_name, unit_name)
 
                     # Navigate to the correct course & unit
-                    _navigate_to_unit(page, course_name, unit_name)
+                    _navigate_to_unit(page, course_name, unit_name, semester_label)
 
                     open_first_slide(page)
                     navigate_through_pages(
@@ -367,10 +405,12 @@ def main() -> None:
     logger.info("All done.")
 
 
-def _navigate_to_unit(page, course_name: str, unit_name: str) -> None:
+def _navigate_to_unit(page, course_name: str, unit_name: str, semester_label: str | None = None) -> None:
     """
     Navigate to the My Courses page, click the matching course row, then the matching unit.
     This allows multi-course/unit looping without restarting the browser.
+    Re-selects `semester_label` after landing on My Courses, since that page
+    resets to the default (current) semester on every fresh navigation.
     """
     from playwright.sync_api import TimeoutError as PwTimeout
 
@@ -379,6 +419,8 @@ def _navigate_to_unit(page, course_name: str, unit_name: str) -> None:
         page.wait_for_selector("span.menu-name:has-text('My Courses')", timeout=10000)
         page.click("span.menu-name:has-text('My Courses')")
         page.wait_for_selector("table.table.table-hover", timeout=15000)
+        if semester_label:
+            select_semester(page, semester_label)
     except PwTimeout:
         pass  # already on courses page
 
