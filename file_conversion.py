@@ -20,7 +20,9 @@ import shutil
 import zipfile
 from collections import defaultdict
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeoutError
+
+from integrity import check_office_zip, quarantine
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,16 @@ def collect_pptx_files(folder: str) -> list[str]:
             if f.lower().endswith(".pptx"):
                 found.append(os.path.join(root, f))
     return found
+
+
+def filter_convertible(files: list[str]) -> list[str]:
+    ok: list[str] = []
+    for f in files:
+        if check_office_zip(f):
+            ok.append(f)
+        else:
+            quarantine(f, "corrupt pptx, excluded before online2pdf upload")
+    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +239,20 @@ def convert_batch_with_online2pdf(pptx_files: list[str]) -> None:
             page.wait_for_timeout(300)
 
         # ── 4. Click Convert — download fires automatically after processing
-        logger.info("Clicking Convert and waiting for automatic download...")
-        with page.expect_download(timeout=600_000) as dl_info:
-            _click_convert(page)
+        timeout_ms = min(max(60_000, 20_000 * len(pptx_files)), 300_000)
+        logger.info("Clicking Convert, waiting up to %ds for download...", timeout_ms // 1000)
+        try:
+            with page.expect_download(timeout=timeout_ms) as dl_info:
+                _click_convert(page)
+        except PwTimeoutError:
+            logger.error(
+                "online2pdf did not respond within %ds for batch of %d file(s). "
+                "This usually means one of the files can't be converted.",
+                timeout_ms // 1000, len(pptx_files),
+            )
+            browser.close()
+            _handle_conversion_stall(pptx_files)
+            return
 
         # ── 5. Save the downloaded file ───────────────────────────────────
         download = dl_info.value
@@ -247,6 +270,24 @@ def convert_batch_with_online2pdf(pptx_files: list[str]) -> None:
         logger.info("Single PDF saved: %s", os.path.basename(downloaded_path))
 
     delete_pptx_files(pptx_files)
+
+
+def _handle_conversion_stall(pptx_files: list[str]) -> None:
+    """
+    online2pdf hung with no download. The pre-batch integrity check already
+    rules out zip corruption, so this is a file the converter itself can't
+    handle (unsupported feature, embedded object, etc). Bisect the batch to
+    isolate and quarantine the offending file(s) instead of losing the whole
+    batch.
+    """
+    if len(pptx_files) == 1:
+        quarantine(pptx_files[0], "online2pdf hung on this file, not convertible")
+        return
+
+    mid = len(pptx_files) // 2
+    logger.warning("Bisecting stalled batch of %d into two halves.", len(pptx_files))
+    convert_batch_with_online2pdf(pptx_files[:mid])
+    convert_batch_with_online2pdf(pptx_files[mid:])
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +309,12 @@ def convert_pptx_to_pdf(folder: str) -> None:
 
     if not all_pptx:
         logger.info("No PPTX files found under: %s", folder)
+        return
+
+    all_pptx = filter_convertible(all_pptx)
+
+    if not all_pptx:
+        logger.warning("All PPTX files under %s failed integrity checks, nothing to convert.", folder)
         return
 
     by_dir: dict[str, list[str]] = defaultdict(list)
