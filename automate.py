@@ -6,6 +6,8 @@ import time
 
 from playwright.sync_api import Page
 
+from integrity import verify_file, quarantine
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -40,11 +42,18 @@ def login(page: Page, username: str, password: str) -> None:
     logger.info("Logged in successfully.")
 
 
-def get_all_courses(page: Page) -> list[str]:
-    """Return list of course names without clicking anything."""
+def _ensure_my_courses_page(page: Page) -> None:
+    table = page.locator("table.table.table-hover")
+    if table.count() > 0 and table.first.is_visible():
+        return
     page.wait_for_selector("span.menu-name:has-text('My Courses')", timeout=15000)
     page.click("span.menu-name:has-text('My Courses')")
     page.wait_for_selector("table.table.table-hover", timeout=15000)
+
+
+def get_all_courses(page: Page) -> list[str]:
+    """Return list of course names, navigating to My Courses only if needed."""
+    _ensure_my_courses_page(page)
     rows = page.locator("table.table.table-hover tbody tr")
     count = rows.count()
     courses = []
@@ -52,6 +61,54 @@ def get_all_courses(page: Page) -> list[str]:
         title = rows.nth(i).locator("td:nth-child(2)").inner_text().strip()
         courses.append(title)
     return courses
+
+
+def _find_semester_select(page: Page):
+    selects = page.locator("select")
+    count = selects.count()
+    for i in range(count):
+        sel = selects.nth(i)
+        opts = sel.locator("option")
+        texts = [opts.nth(j).inner_text().strip() for j in range(opts.count())]
+        if any(t.lower().startswith("sem-") for t in texts):
+            return sel
+    return None
+
+
+def get_available_semesters(page: Page) -> list[str]:
+    _ensure_my_courses_page(page)
+    select = _find_semester_select(page)
+    if select is None:
+        logger.warning("Semester dropdown not found on My Courses page.")
+        return []
+    opts = select.locator("option")
+    return [opts.nth(i).inner_text().strip() for i in range(opts.count())]
+
+
+def select_semester(page: Page, semester_label: str) -> bool:
+    select = _find_semester_select(page)
+    if select is None:
+        logger.error("Semester dropdown not found, cannot switch to '%s'.", semester_label)
+        return False
+
+    opts = select.locator("option")
+    matched = None
+    for i in range(opts.count()):
+        text = opts.nth(i).inner_text().strip()
+        if text.lower() == semester_label.strip().lower():
+            matched = text
+            break
+
+    if not matched:
+        logger.error("Semester '%s' not in dropdown options.", semester_label)
+        return False
+
+    select.select_option(label=matched)
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1000)
+    page.wait_for_selector("table.table.table-hover", timeout=15000)
+    logger.info("Switched to semester: %s", matched)
+    return True
 
 
 def select_course(page: Page) -> str:
@@ -258,6 +315,7 @@ _BLACKLIST_WORDS = {
     "logout", "settings", "pesu", "academy", "login",
     "slides", "notes", "question bank", "qb", "av summary",
     "live videos", "class", "content",
+    "item cursor pointer", "cursor pointer", "cursor", "pointer",
 }
 
 
@@ -266,53 +324,151 @@ def _is_blacklisted(text: str) -> bool:
     return low in _BLACKLIST_WORDS or any(b in low for b in _BLACKLIST_WORDS)
 
 
+def _looks_like_topic(text: str) -> bool:
+    low = text.lower().strip()
+    if not low:
+        return False
+    if _is_blacklisted(low):
+        return False
+    # Reject generic structural labels and obvious UI noise.
+    if low.startswith(("unit ", "topic ", "page ", "slide ")):
+        return False
+    if low in {"next", "previous", "back", "continue", "open"}:
+        return False
+    return 3 <= len(low) <= 200
+
+
+def _breadcrumb_last_segment(page: Page) -> str:
+    """
+    PESU's breadcrumb reads 'My Courses > <course code> : <course> > <topic>'.
+    Find the leaf node whose text is exactly 'My Courses', excluding the
+    identical text in the left sidebar (span.menu-name — the same class the
+    login/navigation code already clicks on). Climb to the shared breadcrumb
+    container and return its last segment, trying element-children first
+    (each crumb as a sibling element) and falling back to splitting the
+    container's raw text on common separator characters (>, ›, »), since
+    some breadcrumb separators are icons with no textContent.
+    """
+    try:
+        text = page.evaluate("""
+            () => {
+                const candidates = Array.from(document.querySelectorAll('a, span, li, div'))
+                    .filter(el => el.children.length === 0 && el.textContent.trim() === 'My Courses');
+                for (const node of candidates) {
+                    if (node.matches('.menu-name') || node.closest('.menu-name')) continue;
+
+                    let container = node.parentElement;
+                    let depth = 0;
+                    while (container && container.children.length < 2 && depth < 6) {
+                        container = container.parentElement;
+                        depth += 1;
+                    }
+                    if (!container) continue;
+
+                    const childParts = Array.from(container.children)
+                        .map(c => c.textContent.trim())
+                        .filter(t => t.length > 0);
+                    if (childParts.length >= 2 && childParts[0] === 'My Courses') {
+                        return childParts[childParts.length - 1];
+                    }
+
+                    const rawParts = container.textContent
+                        .split(/[>\\u203a\\u00bb]/)
+                        .map(s => s.trim())
+                        .filter(s => s.length > 0);
+                    if (rawParts.length >= 2 && rawParts[0] === 'My Courses') {
+                        return rawParts[rawParts.length - 1];
+                    }
+                }
+                return null;
+            }
+        """)
+        return text.strip() if text else ""
+    except Exception:
+        return ""
+
+
+_topic_debug_dumped = False
+
+
+def _dump_topic_debug_html(page: Page) -> None:
+    global _topic_debug_dumped
+    if _topic_debug_dumped:
+        return
+    try:
+        os.makedirs("_debug", exist_ok=True)
+        path = os.path.join("_debug", "topic_extraction_failed.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(page.content())
+        logger.warning(
+            "Topic extraction failed; dumped page HTML to %s for inspection.", path
+        )
+    except Exception as e:
+        logger.debug("Could not dump topic debug HTML: %s", e)
+    finally:
+        _topic_debug_dumped = True
+
+
 def get_page_topic(page: Page) -> str:
-    """
-    Priority:
-    1. Sidebar active item (most reliable for PESU)
-    2. Breadcrumb / navigation path
-    3. Page header (h1/h2/h3)
-    """
-    # 1. Sidebar active item
-    for sel in ["#courselistunit li.active a", "#courselistunit li.active", ".topic-list li.active a"]:
-        try:
-            el = page.locator(sel).first
-            if el.count() > 0:
-                text = el.inner_text().strip()
-                if text and len(text) >= 3 and not _is_blacklisted(text):
-                    return sanitize(text)
-        except Exception:
-            continue
+    def clean(text: str) -> str:
+        if not text:
+            return ""
+        text = text.strip()
+        if text.lower() in ("item cursor pointer", "cursor", "pointer", ""):
+            return ""
+        if _is_blacklisted(text):
+            return ""
+        if len(text) < 3 or len(text) > 200:
+            return ""
+        return sanitize(text)
 
-    # 2. Breadcrumb
-    for sel in [".breadcrumb li:last-child", ".breadcrumb li.active", "nav[aria-label='breadcrumb'] li:last-child"]:
+    # 1) Prefer a real content heading
+    content_selectors = [
+        "#coursecontentarea",
+        ".course-content",
+        ".coursecontent",
+        ".main-content",
+        "#content",
+        ".panel-body",
+    ]
+    for area_sel in content_selectors:
         try:
-            el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible():
-                text = el.inner_text().strip()
-                if text and len(text) >= 3 and not _is_blacklisted(text):
-                    return sanitize(text)
+            area = page.locator(area_sel).first
+            if area.count():
+                for tag in ["h1", "h2", "h3", "h4", ".page-header h1", ".topic-title"]:
+                    heading = area.locator(tag).first
+                    if heading.count():
+                        text = clean(heading.inner_text().strip())
+                        if text:
+                            return text
+                first_text = area.locator(":scope > *").first
+                if first_text.count():
+                    text = clean(first_text.inner_text().strip())
+                    if text:
+                        return text
         except Exception:
-            continue
+            pass
 
-    # 3. Headers
+    # 2) Breadcrumb
     for sel in [
-        ".coursecontent-header h3", ".coursecontent-header h2",
-        "#coursecontentarea h3", "#coursecontentarea h2",
-        "h1", "h2", "h3", ".page-header", ".panel-title", "#heading",
+        "ul.breadcrumb li:last-child",
+        "ol.breadcrumb li:last-child",
+        ".breadcrumb-item:last-child",
+        "nav[aria-label='breadcrumb'] li:last-child",
+        ".pesu-breadcrumb span:last-child",
+        ".page-breadcrumb span:last-child",
     ]:
         try:
             el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible():
-                text = el.inner_text().strip()
-                if text and len(text) >= 3 and not _is_blacklisted(text):
-                    return sanitize(text)
+            if el.count():
+                text = clean(el.inner_text().strip().split(">")[-1])
+                if text:
+                    return text
         except Exception:
-            continue
+            pass
 
+    # 3) No broad body scan
     return ""
-
-
 # ---------------------------------------------------------------------------
 # AV Summary download
 # ---------------------------------------------------------------------------
@@ -397,6 +553,10 @@ def download_av_summaries(
         success = intercept_and_download_vimeo(page, vid_id, filepath)
 
         if success and os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
+            if not verify_file(filepath):
+                quarantine(filepath, "vimeo download failed video integrity check")
+                page_video_counter -= 1
+                continue
             logger.info("Saved -> %s", filepath)
             downloaded_urls.add(vid_id)
         else:
@@ -427,6 +587,9 @@ def download_av_summaries(
             if os.path.getsize(filepath) < 1024:
                 logger.warning("File too small, possibly corrupted: %s", filepath)
                 os.remove(filepath)
+                page_video_counter -= 1
+            elif not verify_file(filepath):
+                quarantine(filepath, "direct mp4 download failed video integrity check")
                 page_video_counter -= 1
             else:
                 logger.info("Saved -> %s", filepath)
@@ -501,6 +664,8 @@ def download_content(
     safe_topic = sanitize(topic_override) if topic_override else f"{course_name}_Topic_{topic_index}"
     if not topic_override:
         logger.warning("Topic extraction failed for %s, using fallback: %s", category, safe_topic)
+    else:
+        logger.info("Using topic title for filename: %s", safe_topic)
 
     file_counter = 1
 
@@ -572,13 +737,15 @@ def download_content(
 
             if category == "Slide":
                 suffix = "" if count == 1 else f"_{file_counter}"
-                base_name = f"{topic_index:03d}_{safe_topic}{suffix}"
+                base_name = f"{safe_topic}{suffix}"
             elif category == "QB":
-                base_name = f"QB_{topic_index:03d}_{safe_topic}"
+                suffix = "" if count == 1 else f"_{file_counter}"
+                base_name = f"QB_{safe_topic}{suffix}"
             elif category == "Note":
-                base_name = f"Note_{topic_index:03d}_{safe_topic}"
+                suffix = "" if count == 1 else f"_{file_counter}"
+                base_name = f"Note_{safe_topic}{suffix}"
             else:
-                base_name = f"{category}_{topic_index:03d}"
+                base_name = f"{category}_{safe_topic}"
 
             filename = get_unique_filename(folder, base_name, ext)
             filepath = os.path.join(folder, filename)
@@ -588,7 +755,11 @@ def download_content(
             valid = (ext == ".pdf" and body[:4] == b"%PDF") or (ext in (".pptx", ".docx") and body[:2] == b"PK")
             if not valid:
                 os.remove(filepath)
-                logger.error("File failed validation and was deleted: %s", filename)
+                logger.error("File failed magic-byte validation and was deleted: %s", filename)
+                continue
+
+            if not verify_file(filepath):
+                quarantine(filepath, "failed structural integrity check on download")
                 continue
 
             logger.info("Saved -> %s", filepath)
@@ -630,11 +801,30 @@ def navigate_through_pages(
         next_button = page.locator(".coursecontent-navigation-area a.pull-right")
         label = next_button.inner_text().strip()
         current_url = page.url
-
+        # Wait for the main content area to be present
+        try:
+            page.wait_for_selector("#coursecontentarea, .course-content, .coursecontent, .main-content", timeout=5000)
+        except Exception:
+            pass  # proceed anyway
         topic = get_page_topic(page)
         if not topic:
-            topic = f"{course_name}_Topic_{topic_index + 1}"
+            # Dump what's actually on the page so we can iterate the selector
+            try:
+                snippet = page.evaluate(
+                    r"""
+                    () => {
+                        const main = document.querySelector('#coursecontentarea, .course-content, .coursecontent, .main-content, #content');
+                        const txt = (main || document.body).innerText || '';
+                        return txt.replace(/\s+/g, ' ').trim().substring(0, 250);
+                    }
+                    """
+                )
+            except Exception:
+                snippet = ""
+            topic = sanitize(f"{course_name} Topic {topic_index + 1}")
             logger.warning("Topic name not found, using fallback: %s", topic)
+            if snippet:
+                logger.warning("Page snippet (first 250 chars): %s", snippet)
 
         topic_index += 1
         checkpoint_key = f"{course_name}|{unit_name}|{topic_index}"
