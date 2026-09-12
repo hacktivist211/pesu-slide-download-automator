@@ -694,7 +694,7 @@ python main.py --download-dir "D:\PESU Downloads"
 python main.py --no-videos --notes --qb --qa --merge
 ```
 
-When all four resource flags are specified, the program does not need to ask the four resource-selection questions. The download option parser returns those explicit values directly. fileciteturn5file0L130-L152
+When all four resource flags are specified, the program does not need to ask the four resource-selection questions. The download option parser returns those explicit values directly. 
 
 ---
 
@@ -733,9 +733,9 @@ A typical processed unit is stored under the configured download root as:
 
 The exact folder/file names depend on the course, unit, topic titles, available resources, and configured merge behavior.
 
-The current document downloader writes Slides into the unit root and places QB, Notes, and QA in their corresponding subdirectories. fileciteturn6file0L63-L112
+The current document downloader writes Slides into the unit root and places QB, Notes, and QA in their corresponding subdirectories. 
 
-The AV Summary downloader uses an `AV_Summaries` directory below the unit folder. fileciteturn5file2L925-L940
+The AV Summary downloader uses an `AV_Summaries` directory below the unit folder. 
 
 ---
 
@@ -805,7 +805,7 @@ The main program intentionally performs conversion and merging only after the Pl
 
 The automator processes an individual unit as a sequence of content pages.
 
-For each page, it attempts to determine the actual current topic before downloading resources. The current navigation loop then passes the extracted topic to all relevant download functions. fileciteturn6file2L723-L808
+For each page, it attempts to determine the actual current topic before downloading resources. The current navigation loop then passes the extracted topic to all relevant download functions. 
 
 The document naming logic prefixes the topic number and category:
 
@@ -816,9 +816,9 @@ QB:     001_QB_<topic>
 QA:     001_QA_<topic>
 ```
 
-This naming scheme is generated before the downloaded file is validated and written to disk. fileciteturn6file0L182-L210
+This naming scheme is generated before the downloaded file is validated and written to disk.
 
-The topic extractor explicitly rejects common resource-tab labels such as `FAQs`, `Slides`, `Notes`, `QB`, `QA`, `AV Summary`, and similar navigation text. It also attempts to distinguish the main-content breadcrumb from the left navigation's `My Courses` entry. fileciteturn5file2L1183-L1254
+The topic extractor explicitly rejects common resource-tab labels such as `FAQs`, `Slides`, `Notes`, `QB`, `QA`, `AV Summary`, and similar navigation text. It also attempts to distinguish the main-content breadcrumb from the left navigation's `My Courses` entry. 
 
 If extraction still fails, the current navigation logic has a numeric fallback such as `Database Management System Topic 1`. A fallback is logged as a warning so that topic extraction failures can be diagnosed instead of being silent.
 
@@ -828,7 +828,7 @@ If extraction still fails, the current navigation logic has a numeric fallback s
 
 The AV Summary downloader looks for Vimeo iframe sources and direct MP4 sources in the content page.
 
-For Vimeo content it records both the Vimeo ID and the original embedded player source where available. This is important for embedded/unlisted content because the original player URL can contain parameters required for access. fileciteturn5file2L1512-L1548
+For Vimeo content it records both the Vimeo ID and the original embedded player source where available. This is important for embedded/unlisted content because the original player URL can contain parameters required for access. 
 
 The current pipeline can then:
 
@@ -841,9 +841,9 @@ The current pipeline can then:
 7. request high-quality video/audio through yt-dlp;
 8. validate the resulting MP4.
 
-The quality-selection logic explicitly prefers separate best video and audio streams no higher than 1080p when FFmpeg is available. fileciteturn5file2L833-L917
+The quality-selection logic explicitly prefers separate best video and audio streams no higher than 1080p when FFmpeg is available. 
 
-When FFmpeg is unavailable, the downloader warns that 1080p cannot be guaranteed when Vimeo exposes separate streams. fileciteturn5file2L845-L864
+When FFmpeg is unavailable, the downloader warns that 1080p cannot be guaranteed when Vimeo exposes separate streams.
 
 ### Video quality troubleshooting
 
@@ -882,9 +882,9 @@ and DOCX files are sent to:
 https://online2pdf.com/convert-docx-to-pdf
 ```
 
-The conversion helper works in batches of up to 30 files. It tries to configure the online converter for separate output files, then extracts the returned ZIP when applicable. fileciteturn6file1L338-L342 fileciteturn6file1L480-L542
+The conversion helper works in batches of up to 30 files. It tries to configure the online converter for separate output files, then extracts the returned ZIP when applicable. 
 
-The conversion step first checks Office-file ZIP integrity before uploading files. Corrupt Office containers are excluded and quarantined. fileciteturn6file1L395-L402
+The conversion step first checks Office-file ZIP integrity before uploading files. Corrupt Office containers are excluded and quarantined. 
 
 ### Important privacy consideration
 
@@ -1114,7 +1114,7 @@ with the source filename and reason for quarantine. fileciteturn5file1L
 
 ### Online PDF conversion fails
 
-The conversion system validates Office files before upload and can split stalled batches into smaller batches. A persistent failure for a particular file can result in that file being quarantined rather than blocking all other conversions. fileciteturn6file1L395-L402 fileciteturn6file1L545-L553
+The conversion system validates Office files before upload and can split stalled batches into smaller batches. A persistent failure for a particular file can result in that file being quarantined rather than blocking all other conversions.
 
 ---
 
