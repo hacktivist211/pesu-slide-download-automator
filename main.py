@@ -119,10 +119,15 @@ def get_credentials(args) -> tuple[str, str]:
 # Download-option helpers
 # ---------------------------------------------------------------------------
 
-def get_download_options(args) -> tuple[bool, bool, bool]:
-    """Return (fetch_videos, fetch_notes, fetch_qb) from CLI args or prompts."""
-    if args.videos is not None and args.notes is not None and args.qb is not None:
-        return args.videos, args.notes, args.qb
+def get_download_options(args) -> tuple[bool, bool, bool, bool]:
+    """Return (fetch_videos, fetch_notes, fetch_qb, fetch_qa) from CLI args or prompts."""
+    if (
+        args.videos is not None
+        and args.notes is not None
+        and args.qb is not None
+        and args.qa is not None
+    ):
+        return args.videos, args.notes, args.qb, args.qa
 
     fetch_videos = args.videos if args.videos is not None else (
         input("\nDownload AV Summaries (Videos)? (y/n): ").strip().lower() == "y"
@@ -133,7 +138,10 @@ def get_download_options(args) -> tuple[bool, bool, bool]:
     fetch_qb = args.qb if args.qb is not None else (
         input("Download Question Banks (QB)? (y/n): ").strip().lower() == "y"
     )
-    return fetch_videos, fetch_notes, fetch_qb
+    fetch_qa = args.qa if args.qa is not None else (
+        input("Download QA? (y/n): ").strip().lower() == "y"
+    )
+    return fetch_videos, fetch_notes, fetch_qb, fetch_qa
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +287,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--videos", action=argparse.BooleanOptionalAction, default=None, help="Download AV Summaries")
     p.add_argument("--notes", action=argparse.BooleanOptionalAction, default=None, help="Download Notes")
     p.add_argument("--qb", action=argparse.BooleanOptionalAction, default=None, help="Download Question Banks")
+    p.add_argument("--qa", action=argparse.BooleanOptionalAction, default=None, help="Download QA")
     p.add_argument("--merge", action=argparse.BooleanOptionalAction, default=None, help="Merge PDFs after download")
     p.add_argument("--multi", choices=["single", "multi_unit", "multi_course"], default=None, help="Selection mode")
     p.add_argument("--debug", action="store_true", help="Enable debug logging and Playwright hooks")
@@ -306,7 +315,7 @@ def main() -> None:
     downloaded_urls: set[str] = set(checkpoint.get("downloaded_urls", []))
 
     username, password = get_credentials(args)
-    fetch_videos, fetch_notes, fetch_qb = get_download_options(args)
+    fetch_videos, fetch_notes, fetch_qb, fetch_qa = get_download_options(args)
 
     work_items: list[tuple[str, str]] = []  # populated inside playwright context
     semester_label: str | None = None
@@ -344,7 +353,7 @@ def main() -> None:
                     navigate_through_pages(
                         page, course_name, unit_name,
                         downloaded_urls,
-                        fetch_videos, fetch_notes, fetch_qb,
+                        fetch_videos, fetch_notes, fetch_qb, fetch_qa,
                         base_dir=base_dir,
                         checkpoint=topic_checkpoint,
                     )
