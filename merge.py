@@ -26,11 +26,13 @@ _PREF_KEYS = {
     "slides": "MERGE_SLIDES",
     "notes":  "MERGE_NOTES",
     "qb":     "MERGE_QB",
+    "qa":     "MERGE_QA",
 }
 _KEEP_KEYS = {
     "slides": "KEEP_ONLY_MERGED_SLIDES",
     "notes":  "KEEP_ONLY_MERGED_NOTES",
     "qb":     "KEEP_ONLY_MERGED_QB",
+    "qa":     "KEEP_ONLY_MERGED_QA",
 }
 
 
@@ -39,16 +41,22 @@ _KEEP_KEYS = {
 # ---------------------------------------------------------------------------
 
 def _sort_key(filename: str) -> tuple:
+    # New naming is 001_Topic, 001_QB_Topic, 001_Note_Topic etc.
+    # Extract leading number for ordering.
+    m = re.match(r"^(\d+)", filename)
+    if m:
+        return (int(m.group(1)), filename.lower())
+    # Backward compat: old QB_001_ / Note_001_ patterns
     m = re.match(r"^QB_(\d+)_", filename)
     if m:
-        return (0, int(m.group(1)))
+        return (int(m.group(1)), filename.lower())
     m = re.match(r"^Note_(\d+)_", filename)
     if m:
-        return (1, int(m.group(1)))
+        return (int(m.group(1)), filename.lower())
     m = re.match(r"^(\d+)_", filename)
     if m:
-        return (2, int(m.group(1)))
-    return (3, float("inf"))
+        return (int(m.group(1)), filename.lower())
+    return (9999, filename.lower())
 
 
 def get_unique_output_path(folder: str, base_name: str) -> str:
@@ -212,6 +220,7 @@ def ask_and_merge_pdfs(
         ("slides", unit_folder,                             output_name or "merged.pdf"),
         ("notes",  os.path.join(unit_folder, "Notes"),      "merged_notes.pdf"),
         ("qb",     os.path.join(unit_folder, "QB"),         "merged_qb.pdf"),
+        ("qa",     os.path.join(unit_folder, "QA"),         "merged_qa.pdf"),
     ]
 
     for category, folder, out_name in categories:
