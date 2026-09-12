@@ -1,18 +1,3 @@
-"""
-file_conversion.py – Convert all .pptx files in a course directory tree to PDF.
-
-Scans recursively so that root/, root/Notes/, and root/QB/ are all covered.
-Uses online2pdf.com in batches of up to 30 files (free tier limit).
-
-Mode behaviour:
-  - 1 file  → "Merge files" mode  → single PDF downloaded directly.
-  - 2+ files → "Convert files separately" mode → ZIP downloaded, extracted in-place.
-
-The download is triggered automatically by online2pdf after conversion completes;
-there is no separate download-link step. We therefore wrap the Convert click
-inside expect_download() so Playwright catches the automatic download.
-"""
-
 import argparse
 import logging
 import os
@@ -26,16 +11,14 @@ from integrity import check_office_zip, quarantine
 
 logger = logging.getLogger(__name__)
 
-ONLINE2PDF_URL = "https://online2pdf.com/convert-pptx-to-pdf"
-BATCH_SIZE = 30  # online2pdf free tier limit
+CONVERT_URLS = {
+    ".pptx": "https://online2pdf.com/convert-pptx-to-pdf",
+    ".docx": "https://online2pdf.com/convert-docx-to-pdf",
+}
+BATCH_SIZE = 30
 
-
-# ---------------------------------------------------------------------------
-# ZIP / cleanup helpers
-# ---------------------------------------------------------------------------
 
 def unzip_and_flatten(zip_path: str, destination: str) -> None:
-    """Extract all files from a ZIP into destination, then remove the ZIP."""
     extract_dir = os.path.join(destination, "_unzipped_temp")
     os.makedirs(extract_dir, exist_ok=True)
     try:
@@ -62,7 +45,7 @@ def unzip_and_flatten(zip_path: str, destination: str) -> None:
         logger.error("Error extracting ZIP %s: %s", zip_path, e)
 
 
-def delete_pptx_files(files: list[str]) -> None:
+def delete_source_files(files: list[str]) -> None:
     for f in files:
         try:
             os.remove(f)
@@ -71,40 +54,31 @@ def delete_pptx_files(files: list[str]) -> None:
             logger.error("Error deleting %s: %s", os.path.basename(f), e)
 
 
-# ---------------------------------------------------------------------------
-# File collection
-# ---------------------------------------------------------------------------
-
 def get_batches(files: list[str], batch_size: int = BATCH_SIZE):
     for i in range(0, len(files), batch_size):
         yield files[i: i + batch_size]
 
 
-def collect_pptx_files(folder: str) -> list[str]:
+def collect_files(folder: str, ext: str) -> list[str]:
     found: list[str] = []
     for root, _dirs, files in os.walk(folder):
         for f in files:
-            if f.lower().endswith(".pptx"):
+            if f.lower().endswith(ext):
                 found.append(os.path.join(root, f))
     return found
 
 
-def filter_convertible(files: list[str]) -> list[str]:
+def filter_convertible(files: list[str], ext: str) -> list[str]:
     ok: list[str] = []
     for f in files:
         if check_office_zip(f):
             ok.append(f)
         else:
-            quarantine(f, "corrupt pptx, excluded before online2pdf upload")
+            quarantine(f, f"corrupt {ext.lstrip('.')}, excluded before online2pdf upload")
     return ok
 
 
-# ---------------------------------------------------------------------------
-# online2pdf.com converter
-# ---------------------------------------------------------------------------
-
 def _click_convert(page) -> None:
-    """Click the Convert button via JS, trying several selectors."""
     page.evaluate("""
         () => {
             const btn =
@@ -120,11 +94,6 @@ def _click_convert(page) -> None:
 
 
 def _set_mode_separately(page) -> bool:
-    """
-    Switch the Mode dropdown to 'Convert files separately'.
-    Returns True if successful.
-    """
-    # Strategy 1: <select> with an option whose text includes 'separately'
     try:
         result = page.evaluate("""
             () => {
@@ -146,7 +115,6 @@ def _set_mode_separately(page) -> bool:
     except Exception as e:
         logger.debug("Mode strategy 1 failed: %s", e)
 
-    # Strategy 2: visible <label> containing the text
     try:
         label = page.locator("label", has_text="Convert files separately").first
         if label.is_visible():
@@ -156,7 +124,6 @@ def _set_mode_separately(page) -> bool:
     except Exception as e:
         logger.debug("Mode strategy 2 failed: %s", e)
 
-    # Strategy 3: radio button with a value hinting at split/separate
     try:
         radio = page.locator(
             "input[type='radio'][value*='split'], input[type='radio'][value*='separate']"
@@ -168,7 +135,6 @@ def _set_mode_separately(page) -> bool:
     except Exception as e:
         logger.debug("Mode strategy 3 failed: %s", e)
 
-    # Strategy 4: JS text-walk click
     try:
         page.evaluate("""
             () => {
@@ -187,48 +153,31 @@ def _set_mode_separately(page) -> bool:
     return False
 
 
-def convert_batch_with_online2pdf(pptx_files: list[str]) -> None:
-    """
-    Upload a batch of .pptx files to online2pdf.com and download the result.
-
-    Confirmed flow (from screenshots):
-      1. Fresh page loads — just a file picker, no list yet.
-      2. Upload files via the file input — the page renders the file list,
-         Mode dropdown, and Convert button (does NOT auto-submit).
-      3. Set Mode to 'Convert files separately' (for multiple files).
-      4. Click Convert — page switches to processing screen and download
-         fires automatically when done.
-
-    expect_download() wraps the Convert click so Playwright catches the
-    automatic download without needing a separate download-link click.
-    """
-    folder = os.path.dirname(pptx_files[0])
-    multiple = len(pptx_files) > 1
+def convert_batch_with_online2pdf(files: list[str], ext: str) -> None:
+    folder = os.path.dirname(files[0])
+    multiple = len(files) > 1
+    url = CONVERT_URLS[ext]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
-        # ── 1. Load the page ──────────────────────────────────────────────
-        logger.info("Opening online2pdf.com (%d file(s))...", len(pptx_files))
-        page.goto(ONLINE2PDF_URL, timeout=60_000)
+        logger.info("Opening %s (%d file(s))...", url, len(files))
+        page.goto(url, timeout=60_000)
         page.wait_for_load_state("networkidle")
 
-        # ── 2. Upload files ───────────────────────────────────────────────
-        logger.info("Uploading %d file(s)...", len(pptx_files))
+        logger.info("Uploading %d file(s)...", len(files))
         upload_input = page.locator("input[type='file']").first
-        upload_input.set_input_files(pptx_files)
+        upload_input.set_input_files(files)
 
-        # Wait for the file list to appear (Mode dropdown + Convert button visible)
         page.wait_for_selector(
             "table#files tr, #fileGroups .filerow, .filerow, tr.filerow, "
             "input[type='submit'][value='Convert'], button:has-text('Convert')",
             timeout=120_000,
         )
-        page.wait_for_timeout(800)  # brief settle for all rows to render
+        page.wait_for_timeout(800)
 
-        # ── 3. Set mode to 'Convert files separately' ─────────────────────
         if multiple:
             if not _set_mode_separately(page):
                 logger.warning(
@@ -238,8 +187,7 @@ def convert_batch_with_online2pdf(pptx_files: list[str]) -> None:
                 )
             page.wait_for_timeout(300)
 
-        # ── 4. Click Convert — download fires automatically after processing
-        timeout_ms = min(max(60_000, 20_000 * len(pptx_files)), 300_000)
+        timeout_ms = min(max(60_000, 20_000 * len(files)), 300_000)
         logger.info("Clicking Convert, waiting up to %ds for download...", timeout_ms // 1000)
         try:
             with page.expect_download(timeout=timeout_ms) as dl_info:
@@ -248,13 +196,12 @@ def convert_batch_with_online2pdf(pptx_files: list[str]) -> None:
             logger.error(
                 "online2pdf did not respond within %ds for batch of %d file(s). "
                 "This usually means one of the files can't be converted.",
-                timeout_ms // 1000, len(pptx_files),
+                timeout_ms // 1000, len(files),
             )
             browser.close()
-            _handle_conversion_stall(pptx_files)
+            _handle_conversion_stall(files, ext)
             return
 
-        # ── 5. Save the downloaded file ───────────────────────────────────
         download = dl_info.value
         downloaded_path = os.path.join(folder, download.suggested_filename)
         download.save_as(downloaded_path)
@@ -262,63 +209,47 @@ def convert_batch_with_online2pdf(pptx_files: list[str]) -> None:
 
         browser.close()
 
-    # ── 5. Post-processing ────────────────────────────────────────────────
     if downloaded_path.lower().endswith(".zip"):
         logger.info("Extracting ZIP...")
         unzip_and_flatten(downloaded_path, folder)
     else:
         logger.info("Single PDF saved: %s", os.path.basename(downloaded_path))
 
-    delete_pptx_files(pptx_files)
+    delete_source_files(files)
 
 
-def _handle_conversion_stall(pptx_files: list[str]) -> None:
-    """
-    online2pdf hung with no download. The pre-batch integrity check already
-    rules out zip corruption, so this is a file the converter itself can't
-    handle (unsupported feature, embedded object, etc). Bisect the batch to
-    isolate and quarantine the offending file(s) instead of losing the whole
-    batch.
-    """
-    if len(pptx_files) == 1:
-        quarantine(pptx_files[0], "online2pdf hung on this file, not convertible")
+def _handle_conversion_stall(files: list[str], ext: str) -> None:
+    if len(files) == 1:
+        quarantine(files[0], f"online2pdf hung on this file, not convertible")
         return
 
-    mid = len(pptx_files) // 2
-    logger.warning("Bisecting stalled batch of %d into two halves.", len(pptx_files))
-    convert_batch_with_online2pdf(pptx_files[:mid])
-    convert_batch_with_online2pdf(pptx_files[mid:])
+    mid = len(files) // 2
+    logger.warning("Bisecting stalled batch of %d into two halves.", len(files))
+    convert_batch_with_online2pdf(files[:mid], ext)
+    convert_batch_with_online2pdf(files[mid:], ext)
 
 
-# ---------------------------------------------------------------------------
-# Main conversion controller
-# ---------------------------------------------------------------------------
-
-def convert_pptx_to_pdf(folder: str) -> None:
-    """
-    Recursively scan `folder` for .pptx files and convert them to PDF
-    using online2pdf.com in batches of up to 30, grouped by directory.
-    """
-    logger.info("Scanning folder tree for .pptx files: %s", folder)
+def convert_files_to_pdf(folder: str, ext: str) -> None:
+    logger.info("Scanning folder tree for %s files: %s", ext, folder)
 
     if not os.path.exists(folder) or not os.path.isdir(folder):
         logger.error("Directory not found: %s", folder)
         return
 
-    all_pptx = collect_pptx_files(folder)
+    all_files = collect_files(folder, ext)
 
-    if not all_pptx:
-        logger.info("No PPTX files found under: %s", folder)
+    if not all_files:
+        logger.info("No %s files found under: %s", ext, folder)
         return
 
-    all_pptx = filter_convertible(all_pptx)
+    all_files = filter_convertible(all_files, ext)
 
-    if not all_pptx:
-        logger.warning("All PPTX files under %s failed integrity checks, nothing to convert.", folder)
+    if not all_files:
+        logger.warning("All %s files under %s failed integrity checks, nothing to convert.", ext, folder)
         return
 
     by_dir: dict[str, list[str]] = defaultdict(list)
-    for path in all_pptx:
+    for path in all_files:
         by_dir[os.path.dirname(path)].append(path)
 
     total_batches = sum(len(list(get_batches(files))) for files in by_dir.values())
@@ -331,18 +262,19 @@ def convert_pptx_to_pdf(folder: str) -> None:
                 "Batch %d/%d | folder: %s | %d file(s)",
                 batch_num, total_batches, dir_path, len(batch),
             )
-            convert_batch_with_online2pdf(batch)
+            convert_batch_with_online2pdf(batch, ext)
 
-    logger.info("All PPTX files converted successfully.")
+    logger.info("All %s files converted successfully.", ext)
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+def convert_pptx_to_pdf(folder: str) -> None:
+    for ext in CONVERT_URLS:
+        convert_files_to_pdf(folder, ext)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parser = argparse.ArgumentParser(description="Convert PPTX to PDF using online2pdf.com")
+    parser = argparse.ArgumentParser(description="Convert PPTX/DOCX to PDF using online2pdf.com")
     parser.add_argument("--folder", "--f", dest="folder", required=True, help="Root folder path")
     args = parser.parse_args()
 
